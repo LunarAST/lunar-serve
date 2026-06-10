@@ -73,25 +73,25 @@ GET /healthz → 200 OK
   "version": "0.5.0",
   "projects": [
     {
-      "name": "anaphase-helix",
-      "displayName": "Anaphase-Helix",
+      "name": "cellrix",
+      "displayName": "Cellrix",
       "source": {
         "type": "github",
         "github": {
-          "owner": "Jasonmilk",
-          "repo": "Anaphase-Helix",
-          "branch": "rs"
+          "owner": "your-github-org",
+          "repo": "cellrix",
+          "branch": "main"
         }
       },
       "visibility": "public"
     },
-    "my-local-project",
     {
-      "name": "cellrix",
-      "displayName": "Cellrix",
+      "name": "my-internal-service",
+      "displayName": "Internal Service",
       "source": { "type": "local" },
-      "visibility": "public"
-    }
+      "visibility": "private"
+    },
+    "my-library"
   ]
 }
 ```
