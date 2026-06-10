@@ -162,6 +162,56 @@ Entries can be:
 
 ---
 
+## Exposing to the Internet (Zero-Trust Security)
+
+When running `lunar-serve` locally and exposing it to the public internet for AI Agent consumption, you MUST adhere to the following security baselines:
+
+### Security Rules
+
+1. **Default: Private projects are hidden on public endpoints**. Projects marked `"visibility": "private"` in `repos.json` are never exposed on public endpoints.
+2. **Use `/private/` endpoints for sensitive data**. These endpoints require Ed25519-JWT authentication.
+3. **Never expose raw HTTP endpoints without JWT for private data**. If using tunnels, ensure only public endpoints are exposed, or require JWT globally.
+
+### Option 1: Cloudflare Tunnel (Free, Zero-config)
+
+```bash
+# Install cloudflared
+curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+chmod +x cloudflared
+
+# Start lunar-serve
+lunar-serve /opt/lunar-map.json
+
+# Create a temporary tunnel
+./cloudflared tunnel --url http://localhost:8787
+```
+
+The terminal outputs a public URL like `https://lunar-serve-xxxx.trycloudflare.com`. Share this with your AI agent.
+
+### Option 2: Tailscale Funnel (Permanent, Secure)
+
+```bash
+# Start lunar-serve
+lunar-serve /opt/lunar-map.json
+
+# Expose via Tailscale Funnel
+tailscale funnel 8787
+```
+
+### Option 3: Ngrok
+
+```bash
+# Start lunar-serve
+lunar-serve /opt/lunar-map.json
+
+# Expose via Ngrok
+ngrok http 8787
+```
+
+> **Important**: All tunnels only expose the data distribution layer. Your source code and local files are NEVER accessible through these tunnels. Only `lunar-map.json` data is served.
+
+---
+
 ## Relationship with Other Components
 
 | Component | Relationship |
