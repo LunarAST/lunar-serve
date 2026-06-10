@@ -1,0 +1,93 @@
+{
+  "version": "0.5.0",
+  "projects": [
+    {
+      "name": "anaphase-helix",
+      "type": "mixed",
+      "sha": "unknown",
+      "scanStatus": "success",
+      "interfaces": {
+        "consumed": [
+          {
+            "method": "POST",
+            "path": "/api/v1/auth/verify",
+            "targetProject": "auth-service"
+          }
+        ],
+        "exposed": [
+          {
+            "method": "GET",
+            "path": "/v1/agent/snapshot"
+          },
+          {
+            "method": "GET",
+            "path": "/api/v1/health"
+          }
+        ]
+      }
+    },
+    {
+      "name": "helix-mind",
+      "type": "library",
+      "sha": "unknown",
+      "scanStatus": "success",
+      "interfaces": {
+        "consumed": [],
+        "exposed": []
+      }
+    },
+    {
+      "name": "cellrix",
+      "type": "library",
+      "sha": "unknown",
+      "scanStatus": "success",
+      "interfaces": {
+        "consumed": [],
+        "exposed": []
+      }
+    }
+  ],
+  "alignments": [
+    {
+      "clientProject": "anaphase-helix",
+      "serverProject": "auth-service",
+      "path": "/api/v1/auth/verify",
+      "method": "POST",
+      "status": "Orphaned"
+    }
+  ],
+  "aggregatedEdges": [
+    {
+      "clientProject": "anaphase-helix",
+      "serverProject": "auth-service",
+      "callCount": 1,
+      "status": "Orphaned",
+      "paths": [
+        "POST /api/v1/auth/verify"
+      ],
+      "ports": []
+    }
+  ],
+  "anomalies": {
+    "unusedEndpoints": [
+      {
+        "project": "anaphase-helix",
+        "path": "/v1/agent/snapshot",
+        "method": "GET"
+      },
+      {
+        "project": "anaphase-helix",
+        "path": "/api/v1/health",
+        "method": "GET"
+      }
+    ],
+    "orphanedConsumers": [
+      {
+        "project": "anaphase-helix",
+        "path": "/api/v1/auth/verify",
+        "method": "POST"
+      }
+    ],
+    "crossLayerViolations": []
+  }
+}
