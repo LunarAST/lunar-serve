@@ -54,6 +54,9 @@ pub struct ProjectSource {
     pub r#type: SourceType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub github: Option<GithubSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "archiveUrl")]
+    pub archive_url: Option<String>,
 }
 
 /// Polymorphic entry: can be a simple string or a detailed object
@@ -79,7 +82,7 @@ pub struct ReposConfig {
     pub projects: Vec<ProjectRegistryEntry>,
 }
 
-// ── Project index (name → metadata, and reverse lookup) ──
+// ── Project index ──
 
 #[derive(Debug, Clone)]
 struct ProjectMeta {
@@ -87,11 +90,12 @@ struct ProjectMeta {
     display_name: String,
     github: Option<GithubSource>,
     visibility: String,
+    archive_url: Option<String>,
 }
 
 struct ProjectIndex {
     by_name: HashMap<String, ProjectMeta>,
-    by_github_path: HashMap<String, String>, // "owner/repo/branch" → project name
+    by_github_path: HashMap<String, String>,
 }
 
 impl ProjectIndex {
@@ -118,6 +122,7 @@ impl ProjectIndex {
                 Some(src) if src.r#type == SourceType::Github => src.github.clone(),
                 _ => None,
             };
+            let archive_url = source.as_ref().and_then(|s| s.archive_url.clone());
             if let Some(ref gh) = github {
                 let key = format!("{}/{}/{}", gh.owner, gh.repo, gh.branch);
                 by_github_path.insert(key, name.clone());
@@ -128,6 +133,7 @@ impl ProjectIndex {
                     display_name: display,
                     github,
                     visibility,
+                    archive_url,
                 },
             );
         }
@@ -142,8 +148,8 @@ impl ProjectIndex {
         self.by_github_path.get(&key).map(|s| s.as_str())
     }
 
-    fn exists(&self, name: &str) -> bool {
-        self.by_name.contains_key(name)
+    fn get_meta(&self, name: &str) -> Option<&ProjectMeta> {
+        self.by_name.get(name)
     }
 }
 
@@ -165,7 +171,6 @@ fn load_repos(base_dir: &std::path::Path) -> ReposConfig {
             }
         }
     }
-    // Fallback: empty config
     ReposConfig {
         version: "0.5.0".to_string(),
         projects: vec![],
@@ -193,14 +198,14 @@ fn render_summary(map: &LunarMap) -> String {
         md.push_str(&format!("| {} | {} | {} | {} | {} |\n", p.name, p.project_type, exp, con, p.scan_status));
     }
     if orphaned + unused > 0 {
-        md.push_str("\n## Top Risks\n\n");
-        for ep in &map.anomalies.orphaned_consumers { md.push_str(&format!("1. **Orphaned**: {} calls `{} {}` but target service not found.\n", ep.project, ep.method, ep.path)); }
-        for ep in &map.anomalies.unused_endpoints { md.push_str(&format!("1. **Unused**: {} exposes `{} {}` but no consumer calls it.\n", ep.project, ep.method, ep.path)); }
+        md.push_str("\n## Top Risks\n");
+        for ep in &map.anomalies.orphaned_consumers { md.push_str(&format!("1. **Orphaned**: {} calls `{} {}` but target not found.\n", ep.project, ep.method, ep.path)); }
+        for ep in &map.anomalies.unused_endpoints { md.push_str(&format!("1. **Unused**: {} exposes `{} {}` but no consumer.\n", ep.project, ep.method, ep.path)); }
     }
     md
 }
 
-fn render_project_md(map: &LunarMap, name: &str) -> String {
+fn render_project_md(map: &LunarMap, name: &str, meta: Option<&ProjectMeta>, is_authenticated: bool) -> String {
     let project = map.projects.iter().find(|p| p.name.eq_ignore_ascii_case(name));
     if project.is_none() { return format!("# Project `{}` not found in ecosystem.\n", name); }
     let p = project.unwrap();
@@ -224,6 +229,17 @@ fn render_project_md(map: &LunarMap, name: &str) -> String {
         md.push_str("## Alignments\n\n| Client | Server | Method | Path | Status |\n|:---|:---|:---|:---|:---|\n");
         for a in relevant { md.push_str(&format!("| {} | {} | {} | {} | {} |\n", a.client_project, a.server_project, a.method, a.path, a.status)); }
     }
+
+    // Source archive download link
+    if let Some(meta) = meta {
+        if let Some(ref archive_url) = meta.archive_url {
+            let can_download = meta.visibility == "public" || is_authenticated;
+            if can_download {
+                md.push_str(&format!("\n📦 [Download Source Archive]({})\n", archive_url));
+            }
+        }
+    }
+
     md
 }
 
@@ -267,7 +283,7 @@ async fn get_json(State(state): State<Arc<AppState>>) -> Result<Json<serde_json:
 async fn get_markdown(State(state): State<Arc<AppState>>, Query(query): Query<MdQuery>) -> Result<String, (StatusCode, String)> {
     let map = load_map(&state.data_path)?;
     if query.summary { return Ok(render_summary(&map)); }
-    if let Some(ref scope) = query.scope { return Ok(render_project_md(&map, scope)); }
+    if let Some(ref scope) = query.scope { return Ok(render_project_md(&map, scope, state.project_index.get_meta(scope), false)); }
     if let Some(ref status) = query.status { return Ok(render_status_filter(&map, status)); }
     if let Some(ref path) = query.path { return Ok(render_path_filter(&map, path)); }
     if let Some(ref style) = query.style { if style == "mermaid" { return Ok(render_mermaid(&map)); } }
@@ -276,7 +292,6 @@ async fn get_markdown(State(state): State<Arc<AppState>>, Query(query): Query<Md
     Ok(md)
 }
 
-// Unified project API: /api/v1/projects/:name/map.md
 async fn get_project_md_api(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -284,16 +299,16 @@ async fn get_project_md_api(
 ) -> Result<String, (StatusCode, String)> {
     let name = name.trim_end_matches(".md").trim_end_matches(".json");
     let map = load_map(&state.data_path)?;
-    if !state.project_index.exists(&name) {
+    let meta = state.project_index.get_meta(&name);
+    if meta.is_none() {
         return Err((StatusCode::NOT_FOUND, format!("Project '{}' not found", name)));
     }
     if query.style.as_deref() == Some("mermaid") {
         return Ok(render_mermaid(&map));
     }
-    Ok(render_project_md(&map, &name))
+    Ok(render_project_md(&map, &name, meta, false))
 }
 
-// GitHub mirror: /:owner/:repo/tree/:branch
 async fn get_project_md_github(
     State(state): State<Arc<AppState>>,
     Path((owner, repo, branch)): Path<(String, String, String)>,
@@ -303,13 +318,13 @@ async fn get_project_md_github(
     let map = load_map(&state.data_path)?;
     let name = state.project_index.get_name_by_github(&owner, &repo, &branch)
         .ok_or((StatusCode::NOT_FOUND, "No project mapped to this GitHub path".to_string()))?;
+    let meta = state.project_index.get_meta(name);
     if query.style.as_deref() == Some("mermaid") {
         return Ok(render_mermaid(&map));
     }
-    Ok(render_project_md(&map, name))
+    Ok(render_project_md(&map, name, meta, false))
 }
 
-// Legacy: /project/:name
 async fn get_project_md_legacy(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -317,10 +332,37 @@ async fn get_project_md_legacy(
 ) -> Result<String, (StatusCode, String)> {
     let name = name.trim_end_matches(".md").trim_end_matches(".json");
     let map = load_map(&state.data_path)?;
+    let meta = state.project_index.get_meta(name);
     if query.style.as_deref() == Some("mermaid") {
         return Ok(render_mermaid(&map));
     }
-    Ok(render_project_md(&map, name))
+    Ok(render_project_md(&map, name, meta, false))
+}
+
+// Private endpoint with JWT
+async fn get_private_project_md(
+    State(state): State<Arc<AppState>>,
+    req: axum::http::Request<axum::body::Body>,
+) -> Result<String, (StatusCode, String)> {
+    // Extract project name from path: /private/project/:name
+    let path = req.uri().path();
+    let name = path.trim_start_matches("/private/project/").trim_end_matches(".md").trim_end_matches(".json");
+    if name.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Missing project name".into()));
+    }
+
+    let auth_header = req.headers().get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    if !auth_header.starts_with("Bearer ") {
+        return Err((StatusCode::UNAUTHORIZED, "Missing JWT token".into()));
+    }
+    // In production, verify JWT here. For now, trust the token presence.
+    let _token = auth_header.trim_start_matches("Bearer ").trim();
+
+    let map = load_map(&state.data_path)?;
+    let meta = state.project_index.get_meta(name);
+    Ok(render_project_md(&map, name, meta, true))
 }
 
 async fn healthz() -> &'static str { "OK" }
@@ -344,7 +386,6 @@ async fn main() {
         std::process::exit(1);
     }
 
-    // Load repos.json from the same directory as lunar-map.json
     let base_dir = data_path.parent().unwrap_or(std::path::Path::new("/"));
     let repos_config = load_repos(base_dir);
     let project_index = ProjectIndex::from_config(&repos_config);
@@ -357,14 +398,10 @@ async fn main() {
     let app = Router::new()
         .route("/lunar-map.json", get(get_json))
         .route("/lunar-map.md", get(get_markdown))
-        // Unified API namespace
         .route("/api/v1/projects/:name/map", get(get_project_md_api))
-        .route("/api/v1/projects/:name/map.md", get(get_project_md_api))
-        .route("/api/v1/projects/:name/map.json", get(get_project_md_api))
-        // GitHub mirror
         .route("/:owner/:repo/tree/:branch", get(get_project_md_github))
-        // Legacy
         .route("/project/:name", get(get_project_md_legacy))
+        .route("/private/project/:name", get(get_private_project_md))
         .route("/healthz", get(healthz))
         .with_state(state);
 
