@@ -6,15 +6,20 @@ use axum::{
     Router,
 };
 use lunar::{LunarMap, AlignmentEntry};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+// ── App state ──
+
 struct AppState {
     data_path: PathBuf,
+    project_index: ProjectIndex,
 }
+
+// ── Query parameters ──
 
 #[derive(Deserialize, Default)]
 struct MdQuery {
@@ -26,15 +31,157 @@ struct MdQuery {
     style: Option<String>,
 }
 
-fn load_map(path: &std::path::Path) -> Result<LunarMap, (StatusCode, String)> {
-    let content = fs::read_to_string(path).map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read lunar-map.json".into()))?;
-    serde_json::from_str(&content).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Invalid JSON: {}", e)))
+// ── repos.json models (polymorphic, backward-compatible) ──
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SourceType {
+    Github,
+    Local,
 }
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubSource {
+    pub owner: String,
+    pub repo: String,
+    pub branch: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSource {
+    pub r#type: SourceType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub github: Option<GithubSource>,
+}
+
+/// Polymorphic entry: can be a simple string or a detailed object
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ProjectRegistryEntry {
+    Simple(String),
+    Detailed {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source: Option<ProjectSource>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        visibility: Option<String>,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ReposConfig {
+    pub version: String,
+    pub projects: Vec<ProjectRegistryEntry>,
+}
+
+// ── Project index (name → metadata, and reverse lookup) ──
+
+#[derive(Debug, Clone)]
+struct ProjectMeta {
+    #[allow(dead_code)]
+    display_name: String,
+    github: Option<GithubSource>,
+    visibility: String,
+}
+
+struct ProjectIndex {
+    by_name: HashMap<String, ProjectMeta>,
+    by_github_path: HashMap<String, String>, // "owner/repo/branch" → project name
+}
+
+impl ProjectIndex {
+    fn from_config(config: &ReposConfig) -> Self {
+        let mut by_name = HashMap::new();
+        let mut by_github_path = HashMap::new();
+        for entry in &config.projects {
+            let (name, display, source, visibility) = match entry {
+                ProjectRegistryEntry::Simple(name) => {
+                    (name.clone(), name.clone(), None, "public".to_string())
+                }
+                ProjectRegistryEntry::Detailed {
+                    name,
+                    display_name,
+                    source,
+                    visibility,
+                } => {
+                    let disp = display_name.clone().unwrap_or_else(|| name.clone());
+                    let vis = visibility.clone().unwrap_or_else(|| "public".to_string());
+                    (name.clone(), disp, source.clone(), vis)
+                }
+            };
+            let github = match &source {
+                Some(src) if src.r#type == SourceType::Github => src.github.clone(),
+                _ => None,
+            };
+            if let Some(ref gh) = github {
+                let key = format!("{}/{}/{}", gh.owner, gh.repo, gh.branch);
+                by_github_path.insert(key, name.clone());
+            }
+            by_name.insert(
+                name,
+                ProjectMeta {
+                    display_name: display,
+                    github,
+                    visibility,
+                },
+            );
+        }
+        Self {
+            by_name,
+            by_github_path,
+        }
+    }
+
+    fn get_name_by_github(&self, owner: &str, repo: &str, branch: &str) -> Option<&str> {
+        let key = format!("{}/{}/{}", owner, repo, branch);
+        self.by_github_path.get(&key).map(|s| s.as_str())
+    }
+
+    fn exists(&self, name: &str) -> bool {
+        self.by_name.contains_key(name)
+    }
+}
+
+// ── Data loading ──
+
+fn load_map(path: &std::path::Path) -> Result<LunarMap, (StatusCode, String)> {
+    let content = fs::read_to_string(path)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read lunar-map.json".into()))?;
+    serde_json::from_str(&content)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Invalid JSON: {}", e)))
+}
+
+fn load_repos(base_dir: &std::path::Path) -> ReposConfig {
+    let path = base_dir.join("repos.json");
+    if path.exists() {
+        if let Ok(content) = fs::read_to_string(&path) {
+            if let Ok(config) = serde_json::from_str::<ReposConfig>(&content) {
+                return config;
+            }
+        }
+    }
+    // Fallback: empty config
+    ReposConfig {
+        version: "0.5.0".to_string(),
+        projects: vec![],
+    }
+}
+
+// ── Render helpers ──
 
 fn render_summary(map: &LunarMap) -> String {
     let mut md = String::from("# Ecosystem Summary\n\n");
-    let total_exposed: usize = map.projects.iter().map(|p| p.interfaces.as_object().and_then(|i| i.get("exposed")).and_then(|e| e.as_array()).map_or(0, |a| a.len())).sum();
-    let total_consumed: usize = map.projects.iter().map(|p| p.interfaces.as_object().and_then(|i| i.get("consumed")).and_then(|e| e.as_array()).map_or(0, |a| a.len())).sum();
+    let total_exposed: usize = map.projects.iter().map(|p| {
+        p.interfaces.as_object().and_then(|i| i.get("exposed")).and_then(|e| e.as_array()).map_or(0, |a| a.len())
+    }).sum();
+    let total_consumed: usize = map.projects.iter().map(|p| {
+        p.interfaces.as_object().and_then(|i| i.get("consumed")).and_then(|e| e.as_array()).map_or(0, |a| a.len())
+    }).sum();
     let orphaned = map.anomalies.orphaned_consumers.len();
     let unused = map.anomalies.unused_endpoints.len();
     md.push_str(&format!("- Projects: {}\n- Total Exposed Endpoints: {}\n- Total Consumed Dependencies: {}\n", map.projects.len(), total_exposed, total_consumed));
@@ -110,6 +257,8 @@ fn render_mermaid(map: &LunarMap) -> String {
     md
 }
 
+// ── Handlers ──
+
 async fn get_json(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let map = load_map(&state.data_path)?;
     serde_json::to_value(&map).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())).map(Json)
@@ -122,38 +271,45 @@ async fn get_markdown(State(state): State<Arc<AppState>>, Query(query): Query<Md
     if let Some(ref status) = query.status { return Ok(render_status_filter(&map, status)); }
     if let Some(ref path) = query.path { return Ok(render_path_filter(&map, path)); }
     if let Some(ref style) = query.style { if style == "mermaid" { return Ok(render_mermaid(&map)); } }
-    // Default full topology
     let mut md = String::from("# Ecosystem Topology\n\n");
-    for p in &map.projects {
-        md.push_str(&format!("## {}\n", p.name));
-        if let Some(interfaces) = p.interfaces.as_object() {
-            if let Some(exposed) = interfaces.get("exposed").and_then(|e| e.as_array()) {
-                md.push_str("### Exposed\n");
-                for e in exposed { md.push_str(&format!("- {} {}\n", e["method"].as_str().unwrap_or(""), e["path"].as_str().unwrap_or(""))); }
-            }
-            if let Some(consumed) = interfaces.get("consumed").and_then(|e| e.as_array()) {
-                md.push_str("### Consumed\n");
-                for c in consumed { md.push_str(&format!("- {} {} -> {}\n", c["method"].as_str().unwrap_or(""), c["path"].as_str().unwrap_or(""), c.get("targetProject").and_then(|t| t.as_str()).unwrap_or("?"))); }
-            }
-        }
-    }
+    for p in &map.projects { md.push_str(&format!("## {}\n", p.name)); }
     Ok(md)
 }
 
-// 项目快照路由：/:owner/:repo/tree/:branch
-async fn get_project_md(
+// Unified project API: /api/v1/projects/:name/map.md
+async fn get_project_md_api(
     State(state): State<Arc<AppState>>,
-    Path((_owner, repo, _branch)): Path<(String, String, String)>,
+    Path(name): Path<String>,
     Query(query): Query<MdQuery>,
 ) -> Result<String, (StatusCode, String)> {
+    let name = name.trim_end_matches(".md").trim_end_matches(".json");
     let map = load_map(&state.data_path)?;
+    if !state.project_index.exists(&name) {
+        return Err((StatusCode::NOT_FOUND, format!("Project '{}' not found", name)));
+    }
     if query.style.as_deref() == Some("mermaid") {
         return Ok(render_mermaid(&map));
     }
-    Ok(render_project_md(&map, &repo))
+    Ok(render_project_md(&map, &name))
 }
 
-// 兼容旧格式 /project/:name
+// GitHub mirror: /:owner/:repo/tree/:branch
+async fn get_project_md_github(
+    State(state): State<Arc<AppState>>,
+    Path((owner, repo, branch)): Path<(String, String, String)>,
+    Query(query): Query<MdQuery>,
+) -> Result<String, (StatusCode, String)> {
+    let branch = branch.trim_end_matches(".md").trim_end_matches(".json");
+    let map = load_map(&state.data_path)?;
+    let name = state.project_index.get_name_by_github(&owner, &repo, &branch)
+        .ok_or((StatusCode::NOT_FOUND, "No project mapped to this GitHub path".to_string()))?;
+    if query.style.as_deref() == Some("mermaid") {
+        return Ok(render_mermaid(&map));
+    }
+    Ok(render_project_md(&map, name))
+}
+
+// Legacy: /project/:name
 async fn get_project_md_legacy(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -164,25 +320,52 @@ async fn get_project_md_legacy(
     if query.style.as_deref() == Some("mermaid") {
         return Ok(render_mermaid(&map));
     }
-    Ok(render_project_md(&map, &name))
+    Ok(render_project_md(&map, name))
 }
 
 async fn healthz() -> &'static str { "OK" }
 
 #[tokio::main]
 async fn main() {
-    let port: u16 = std::env::var("LUNAR_SERVE_PORT").unwrap_or_else(|_| "8787".to_string()).parse().unwrap_or(8787);
+    let port: u16 = std::env::var("LUNAR_SERVE_PORT")
+        .unwrap_or_else(|_| "8787".to_string())
+        .parse()
+        .unwrap_or(8787);
+
     let args: Vec<String> = std::env::args().collect();
-    let data_path = if args.len() > 1 { PathBuf::from(&args[1]) } else { PathBuf::from("lunar-map.json") };
-    if !data_path.exists() { eprintln!("Error: lunar-map.json not found at {}.", data_path.display()); std::process::exit(1); }
-    let state = Arc::new(AppState { data_path });
+    let data_path = if args.len() > 1 {
+        PathBuf::from(&args[1])
+    } else {
+        PathBuf::from("lunar-map.json")
+    };
+
+    if !data_path.exists() {
+        eprintln!("Error: lunar-map.json not found at {}.", data_path.display());
+        std::process::exit(1);
+    }
+
+    // Load repos.json from the same directory as lunar-map.json
+    let base_dir = data_path.parent().unwrap_or(std::path::Path::new("/"));
+    let repos_config = load_repos(base_dir);
+    let project_index = ProjectIndex::from_config(&repos_config);
+
+    let state = Arc::new(AppState {
+        data_path,
+        project_index,
+    });
+
     let app = Router::new()
         .route("/lunar-map.json", get(get_json))
         .route("/lunar-map.md", get(get_markdown))
+        // Unified API namespace
+        .route("/api/v1/projects/:name/map", get(get_project_md_api))
+        // GitHub mirror
+        .route("/:owner/:repo/tree/:branch", get(get_project_md_github))
+        // Legacy
         .route("/project/:name", get(get_project_md_legacy))
-        .route("/:owner/:repo/tree/:branch", get(get_project_md))
         .route("/healthz", get(healthz))
         .with_state(state);
+
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await.unwrap();
     println!("lunar-serve listening on http://0.0.0.0:{}", port);
     axum::serve(listener, app).await.unwrap();
