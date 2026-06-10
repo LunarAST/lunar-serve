@@ -359,6 +359,8 @@ async fn main() {
         .route("/lunar-map.md", get(get_markdown))
         // Unified API namespace
         .route("/api/v1/projects/:name/map", get(get_project_md_api))
+        .route("/api/v1/projects/:name/map.md", get(get_project_md_api))
+        .route("/api/v1/projects/:name/map.json", get(get_project_md_api))
         // GitHub mirror
         .route("/:owner/:repo/tree/:branch", get(get_project_md_github))
         // Legacy
