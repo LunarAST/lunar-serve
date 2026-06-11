@@ -5,10 +5,9 @@ use axum::{
     routing::get,
     Router,
 };
-use lunar_interface::{AlignmentEntry, LunarMap};
-use lunar_serve::{load_repos, ProjectIndex, ProjectMeta};
+use lunar_interface::LunarMap;
+use lunar_serve::{load_repos, ProjectIndex};
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
