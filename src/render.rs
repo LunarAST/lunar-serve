@@ -1,7 +1,46 @@
+use axum::{
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    Json,
+};
 use lunar_interface::{AlignmentEntry, LunarMap};
 use lunar_serve::ProjectMeta;
-use crate::utils::render_directory_tree;
+use crate::utils::{render_directory_tree, render_directory_tree_json};
 use std::collections::HashMap;
+
+/// Renders either JSON or Markdown project tree based on the HTTP Accept header.
+pub fn render_negotiated_tree(
+    headers: &HeaderMap,
+    map: &LunarMap,
+    name: &str,
+    meta: Option<&ProjectMeta>,
+    is_authenticated: bool,
+) -> Result<Response, (StatusCode, String)> {
+    let accept_header = headers.get("Accept").and_then(|v| v.to_str().ok()).unwrap_or("");
+
+    // Resolve base path via secondary fallback strategy
+    let base_path = meta.and_then(|m| m.path.as_deref())
+        .map(|p| p.to_string())
+        .or_else(|| {
+            map.projects.iter()
+                .find(|proj| proj.name.eq_ignore_ascii_case(name))
+                .and_then(|proj| proj.path.clone())
+        });
+
+    if accept_header.contains("application/json") {
+        if let Some(ref path) = base_path {
+            if std::path::Path::new(path).exists() {
+                let json_tree = render_directory_tree_json(path);
+                return Ok(Json(json_tree).into_response());
+            }
+        }
+        return Ok(Json(serde_json::Value::Null).into_response());
+    }
+
+    // Default to highly cohesive Markdown with embedded file tree outline
+    let md = render_project_md(map, name, meta, is_authenticated);
+    Ok(md.into_response())
+}
 
 pub fn render_summary(map: &LunarMap) -> String {
     let mut md = String::from("# Ecosystem Summary\n\n");
@@ -54,7 +93,6 @@ pub fn render_project_md(map: &LunarMap, name: &str, meta: Option<&ProjectMeta>,
         }
     }
 
-    // Auto-discover path to dynamically append the workspace directory tree at the bottom
     let base_path = meta.and_then(|m| m.path.as_deref())
         .map(|p| p.to_string())
         .or_else(|| {

@@ -1,7 +1,7 @@
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
-    response::Json,
+    response::{IntoResponse, Response, Json},
     routing::get,
     Router,
 };
@@ -37,13 +37,36 @@ fn load_map(path: &std::path::Path) -> Result<LunarMap, (StatusCode, String)> {
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Invalid JSON: {}", e)))
 }
 
-async fn get_json(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let map = load_map(&state.data_path)?;
-    serde_json::to_value(&map).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())).map(Json)
+/// Generates a standardized, AI-friendly diagnostic error response with X-Lunar-Diagnostic headers.
+fn make_error_response(status: StatusCode, error_msg: &str, hint: &str) -> Response {
+    let body_val = serde_json::json!({
+        "error": error_msg,
+        "hint": hint
+    });
+    
+    let mut response = (status, Json(body_val)).into_response();
+    response.headers_mut().insert(
+        "X-Lunar-Diagnostic",
+        axum::http::HeaderValue::from_str(hint).unwrap_or(axum::http::HeaderValue::from_static("error"))
+    );
+    response
 }
 
-async fn get_markdown(State(state): State<Arc<AppState>>, Query(query): Query<MdQuery>) -> Result<String, (StatusCode, String)> {
-    let map = load_map(&state.data_path)?;
+async fn get_json(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, Response> {
+    let map = match load_map(&state.data_path) {
+        Ok(m) => m,
+        Err((status, err)) => return Err(make_error_response(status, &err, "Failed to read global lunar-map.json")),
+    };
+    serde_json::to_value(&map)
+        .map_err(|e| make_error_response(StatusCode::INTERNAL_SERVER_ERROR, "Serialization failed", &e.to_string()))
+        .map(Json)
+}
+
+async fn get_markdown(State(state): State<Arc<AppState>>, Query(query): Query<MdQuery>) -> Result<String, Response> {
+    let map = match load_map(&state.data_path) {
+        Ok(m) => m,
+        Err((status, err)) => return Err(make_error_response(status, &err, "Failed to read global lunar-map.json")),
+    };
     if query.summary { return Ok(render::render_summary(&map)); }
     if let Some(ref scope) = query.scope { return Ok(render::render_project_md(&map, scope, state.project_index.get_meta(scope), false)); }
     if let Some(ref status) = query.status { return Ok(render::render_status_filter(&map, status)); }
@@ -54,40 +77,90 @@ async fn get_markdown(State(state): State<Arc<AppState>>, Query(query): Query<Md
     Ok(md)
 }
 
-async fn get_project_md_api(State(state): State<Arc<AppState>>, Path(name): Path<String>, Query(query): Query<MdQuery>) -> Result<String, (StatusCode, String)> {
+async fn get_project_md_api(
+    State(state): State<Arc<AppState>>, 
+    headers: HeaderMap,
+    Path(name): Path<String>, 
+    Query(query): Query<MdQuery>
+) -> Result<Response, Response> {
     let name = name.trim_end_matches(".md").trim_end_matches(".json");
-    let map = load_map(&state.data_path)?;
+    let map = match load_map(&state.data_path) {
+        Ok(m) => m,
+        Err((status, err)) => return Err(make_error_response(status, &err, "Failed to read global lunar-map.json")),
+    };
     let meta = state.project_index.get_meta(&name);
-    if query.style.as_deref() == Some("mermaid") { return Ok(render::render_mermaid(&map)); }
-    Ok(render::render_project_md(&map, &name, meta, false))
+    if query.style.as_deref() == Some("mermaid") { return Ok(render::render_mermaid(&map).into_response()); }
+    
+    render::render_negotiated_tree(&headers, &map, &name, meta, false)
+        .map_err(|(status, err)| make_error_response(status, &err, "Failed to render negotiated tree on API request"))
 }
 
-async fn get_project_md_github(State(state): State<Arc<AppState>>, Path((owner, repo, branch)): Path<(String, String, String)>, Query(query): Query<MdQuery>) -> Result<String, (StatusCode, String)> {
+async fn get_project_md_github(
+    State(state): State<Arc<AppState>>, 
+    headers: HeaderMap,
+    Path((owner, repo, branch)): Path<(String, String, String)>, 
+    Query(query): Query<MdQuery>
+) -> Result<Response, Response> {
     let branch = branch.trim_end_matches(".md").trim_end_matches(".json");
-    let map = load_map(&state.data_path)?;
-    let name = state.project_index.get_name_by_github(&owner, &repo, &branch).ok_or((StatusCode::NOT_FOUND, "No project mapped to this GitHub path".to_string()))?;
+    let map = match load_map(&state.data_path) {
+        Ok(m) => m,
+        Err((status, err)) => return Err(make_error_response(status, &err, "Failed to read global lunar-map.json")),
+    };
+    let name = match state.project_index.get_name_by_github(&owner, &repo, &branch) {
+        Some(n) => n,
+        None => {
+            return Err(make_error_response(
+                StatusCode::NOT_FOUND,
+                "No project mapped to this GitHub path",
+                &format!("Verify your repos.json coordinates. Ensure owner '{}', repo '{}' and branch '{}' match.", owner, repo, branch)
+            ));
+        }
+    };
     let meta = state.project_index.get_meta(name);
-    if query.style.as_deref() == Some("mermaid") { return Ok(render::render_mermaid(&map)); }
-    Ok(render::render_project_md(&map, name, meta, false))
+    if query.style.as_deref() == Some("mermaid") { return Ok(render::render_mermaid(&map).into_response()); }
+    
+    render::render_negotiated_tree(&headers, &map, name, meta, false)
+        .map_err(|(status, err)| make_error_response(status, &err, "Failed to render negotiated tree on GitHub coordinates request"))
 }
 
-async fn get_project_md_legacy(State(state): State<Arc<AppState>>, Path(name): Path<String>, Query(query): Query<MdQuery>) -> Result<String, (StatusCode, String)> {
+async fn get_project_md_legacy(
+    State(state): State<Arc<AppState>>, 
+    headers: HeaderMap,
+    Path(name): Path<String>, 
+    Query(query): Query<MdQuery>
+) -> Result<Response, Response> {
     let name = name.trim_end_matches(".md").trim_end_matches(".json");
-    let map = load_map(&state.data_path)?;
-    let meta = state.project_index.get_meta(name);
-    if query.style.as_deref() == Some("mermaid") { return Ok(render::render_mermaid(&map)); }
-    Ok(render::render_project_md(&map, name, meta, false))
+    let map = match load_map(&state.data_path) {
+        Ok(m) => m,
+        Err((status, err)) => return Err(make_error_response(status, &err, "Failed to read global lunar-map.json")),
+    };
+    let meta = state.project_index.get_meta(&name);
+    if query.style.as_deref() == Some("mermaid") { return Ok(render::render_mermaid(&map).into_response()); }
+    
+    render::render_negotiated_tree(&headers, &map, &name, meta, false)
+        .map_err(|(status, err)| make_error_response(status, &err, "Failed to render negotiated tree on legacy request"))
 }
 
-async fn get_private_project_md(State(state): State<Arc<AppState>>, req: axum::http::Request<axum::body::Body>) -> Result<String, (StatusCode, String)> {
+async fn get_private_project_md(
+    State(state): State<Arc<AppState>>, 
+    headers: HeaderMap,
+    req: axum::http::Request<axum::body::Body>
+) -> Result<Response, Response> {
     let path = req.uri().path();
     let name = path.trim_start_matches("/private/project/").trim_end_matches(".md").trim_end_matches(".json");
-    if name.is_empty() { return Err((StatusCode::BAD_REQUEST, "Missing project name".into())); }
+    if name.is_empty() { return Err(make_error_response(StatusCode::BAD_REQUEST, "Missing project name", "Check your request path.")); }
+    
     let auth = req.headers().get("Authorization").and_then(|v| v.to_str().ok()).unwrap_or_default();
-    if !auth.starts_with("Bearer ") { return Err((StatusCode::UNAUTHORIZED, "Missing JWT token".into())); }
-    let map = load_map(&state.data_path)?;
+    if !auth.starts_with("Bearer ") { return Err(make_error_response(StatusCode::UNAUTHORIZED, "Missing JWT token", "Private routes require a valid Bearer token.")); }
+    
+    let map = match load_map(&state.data_path) {
+        Ok(m) => m,
+        Err((status, err)) => return Err(make_error_response(status, &err, "Failed to read global lunar-map.json")),
+    };
     let meta = state.project_index.get_meta(name);
-    Ok(render::render_project_md(&map, name, meta, true))
+    
+    render::render_negotiated_tree(&headers, &map, name, meta, true)
+        .map_err(|(status, err)| make_error_response(status, &err, "Failed to render negotiated tree on private request"))
 }
 
 async fn healthz() -> &'static str { "OK" }
@@ -98,28 +171,48 @@ async fn get_raw_file_api(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path((name, filepath)): Path<(String, String)>,
-) -> Result<String, (StatusCode, String)> {
+) -> Result<Response, Response> {
     let name = name.trim_end_matches(".md").trim_end_matches(".json");
-    let map = load_map(&state.data_path)?;
+    let map = match load_map(&state.data_path) {
+        Ok(m) => m,
+        Err((status, err)) => return Err(make_error_response(status, &err, "Failed to read global lunar-map.json")),
+    };
     let meta = state.project_index.get_meta(&name);
 
     // Authorization barrier for private projects
     let visibility = meta.map(|m| m.visibility.as_str()).unwrap_or("public");
     if visibility == "private" && !utils::is_authorized(&headers) {
-        return Err((StatusCode::UNAUTHORIZED, "Unauthorized access to private workspace".to_string()));
+        return Err(make_error_response(
+            StatusCode::UNAUTHORIZED,
+            "Unauthorized access",
+            "This project is private. Please provide a valid Bearer JWT token in your Authorization header."
+        ));
     }
 
-    // Auto-discover path: 1. check repos.json override, 2. fallback to automated map configuration
+    // Auto-discover path
     let base_path = meta.and_then(|m| m.path.as_deref())
         .map(|p| p.to_string())
         .or_else(|| {
             map.projects.iter()
                 .find(|p| p.name.eq_ignore_ascii_case(&name))
                 .and_then(|p| p.path.clone())
-        })
-        .ok_or((StatusCode::BAD_REQUEST, "No physical workspace path mapped for this project".to_string()))?;
+        });
+        
+    let base_path = match base_path {
+        Some(p) => p,
+        None => {
+            return Err(make_error_response(
+                StatusCode::BAD_REQUEST,
+                "Workspace path missing",
+                &format!("No physical workspace path could be auto-detected or mapped for project '{}'. Did you run 'lunar map -o /opt/lunar-map.json' inside the CLI folder?", name)
+            ));
+        }
+    };
 
-    utils::read_secure_file(&base_path, &filepath)
+    match utils::read_secure_file(&base_path, &filepath) {
+        Ok(content) => Ok(content.into_response()),
+        Err((status, err, hint)) => Err(make_error_response(status, &err, &hint)),
+    }
 }
 
 /// Endpoint to serve raw file content mirroring GitHub's URL format.
@@ -128,31 +221,59 @@ async fn get_raw_file_github(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path((owner, repo, branch, filepath)): Path<(String, String, String, String)>,
-) -> Result<String, (StatusCode, String)> {
+) -> Result<Response, Response> {
     let branch = branch.trim_end_matches(".md").trim_end_matches(".json");
-    let map = load_map(&state.data_path)?;
-    let name = state.project_index.get_name_by_github(&owner, &repo, &branch)
-        .ok_or((StatusCode::NOT_FOUND, "No project mapped to this GitHub path".to_string()))?;
+    let map = match load_map(&state.data_path) {
+        Ok(m) => m,
+        Err((status, err)) => return Err(make_error_response(status, &err, "Failed to read global lunar-map.json")),
+    };
+    let name = match state.project_index.get_name_by_github(&owner, &repo, &branch) {
+        Some(n) => n,
+        None => {
+            return Err(make_error_response(
+                StatusCode::NOT_FOUND,
+                "No project mapped to this GitHub path",
+                &format!("Verify your repos.json coordinates. Ensure owner '{}', repo '{}' and branch '{}' match.", owner, repo, branch)
+            ));
+        }
+    };
 
     let meta = state.project_index.get_meta(name);
 
     // Authorization barrier for private projects
     let visibility = meta.map(|m| m.visibility.as_str()).unwrap_or("public");
     if visibility == "private" && !utils::is_authorized(&headers) {
-        return Err((StatusCode::UNAUTHORIZED, "Unauthorized access to private workspace".to_string()));
+        return Err(make_error_response(
+            StatusCode::UNAUTHORIZED,
+            "Unauthorized access",
+            "This project is private. Please provide a valid Bearer JWT token in your Authorization header."
+        ));
     }
 
-    // Auto-discover path: 1. check repos.json override, 2. fallback to automated map configuration
+    // Auto-discover path
     let base_path = meta.and_then(|m| m.path.as_deref())
         .map(|p| p.to_string())
         .or_else(|| {
             map.projects.iter()
                 .find(|p| p.name.eq_ignore_ascii_case(name))
                 .and_then(|p| p.path.clone())
-        })
-        .ok_or((StatusCode::BAD_REQUEST, "No physical workspace path mapped for this project".to_string()))?;
+        });
+        
+    let base_path = match base_path {
+        Some(p) => p,
+        None => {
+            return Err(make_error_response(
+                StatusCode::BAD_REQUEST,
+                "Workspace path missing",
+                &format!("No physical workspace path could be auto-detected or mapped for project '{}'. Did you run 'lunar map -o /opt/lunar-map.json' inside the CLI folder?", name)
+            ));
+        }
+    };
 
-    utils::read_secure_file(&base_path, &filepath)
+    match utils::read_secure_file(&base_path, &filepath) {
+        Ok(content) => Ok(content.into_response()),
+        Err((status, err, hint)) => Err(make_error_response(status, &err, &hint)),
+    }
 }
 
 #[tokio::main]
