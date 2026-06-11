@@ -5,7 +5,7 @@ use axum::{
     routing::get,
     Router,
 };
-use lunar::LunarMap;
+use lunar_interface::{AlignmentEntry, LunarMap};
 use lunar_serve::{load_repos, ProjectIndex, ProjectMeta};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -75,7 +75,7 @@ fn render_project_md(map: &LunarMap, name: &str, meta: Option<&ProjectMeta>, is_
             md.push('\n');
         }
     }
-    let relevant: Vec<&lunar::AlignmentEntry> = map.alignments.iter().filter(|a| a.client_project.eq_ignore_ascii_case(name) || a.server_project.eq_ignore_ascii_case(name)).collect();
+    let relevant: Vec<&AlignmentEntry> = map.alignments.iter().filter(|a| a.client_project.eq_ignore_ascii_case(name) || a.server_project.eq_ignore_ascii_case(name)).collect();
     if !relevant.is_empty() {
         md.push_str("## Alignments\n\n| Client | Server | Method | Path | Status |\n|:---|:---|:---|:---|:---|\n");
         for a in relevant { md.push_str(&format!("| {} | {} | {} | {} | {} |\n", a.client_project, a.server_project, a.method, a.path, a.status)); }
@@ -89,7 +89,7 @@ fn render_project_md(map: &LunarMap, name: &str, meta: Option<&ProjectMeta>, is_
 }
 
 fn render_status_filter(map: &LunarMap, status: &str) -> String {
-    let filtered: Vec<&lunar::AlignmentEntry> = map.alignments.iter().filter(|a| a.status.eq_ignore_ascii_case(status)).collect();
+    let filtered: Vec<&AlignmentEntry> = map.alignments.iter().filter(|a| a.status.eq_ignore_ascii_case(status)).collect();
     let mut md = format!("# Alignments with status `{}` ({})\n\n", status, filtered.len());
     if filtered.is_empty() { md.push_str("No matching alignments.\n"); }
     else { md.push_str("| Client | Server | Method | Path | Status |\n|:---|:---|:---|:---|:---|\n"); for a in filtered { md.push_str(&format!("| {} | {} | {} | {} | {} |\n", a.client_project, a.server_project, a.method, a.path, a.status)); } }
@@ -97,7 +97,7 @@ fn render_status_filter(map: &LunarMap, status: &str) -> String {
 }
 
 fn render_path_filter(map: &LunarMap, path: &str) -> String {
-    let filtered: Vec<&lunar::AlignmentEntry> = map.alignments.iter().filter(|a| a.path.contains(path)).collect();
+    let filtered: Vec<&AlignmentEntry> = map.alignments.iter().filter(|a| a.path.contains(path)).collect();
     let mut md = format!("# Alignments related to path `{}` ({})\n\n", path, filtered.len());
     if filtered.is_empty() { md.push_str("No matching alignments.\n"); }
     else { md.push_str("| Client | Server | Method | Path | Status |\n|:---|:---|:---|:---|:---|\n"); for a in filtered { md.push_str(&format!("| {} | {} | {} | {} | {} |\n", a.client_project, a.server_project, a.method, a.path, a.status)); } }
@@ -241,7 +241,7 @@ async fn get_raw_file_api(
 }
 
 /// Endpoint to serve raw file content mirroring GitHub's URL format.
-/// Path matches: /:owner/:repo/raw/:branch/*filepath
+/// Supports both /raw/ and /blob/ path aliases dynamically for zero-friction AI consumption.
 async fn get_raw_file_github(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -283,6 +283,8 @@ async fn main() {
     let repos_config = load_repos(base_dir);
     let project_index = ProjectIndex::from_config(&repos_config);
     let state = Arc::new(AppState { data_path, project_index });
+    
+    // Wire up handlers, mapping both `/raw/` and `/blob/` to fulfill AI projection needs
     let app = Router::new()
         .route("/lunar-map.json", get(get_json))
         .route("/lunar-map.md", get(get_markdown))
@@ -290,10 +292,12 @@ async fn main() {
         .route("/api/v1/projects/:name/raw/*filepath", get(get_raw_file_api))
         .route("/:owner/:repo/tree/:branch", get(get_project_md_github))
         .route("/:owner/:repo/raw/:branch/*filepath", get(get_raw_file_github))
+        .route("/:owner/:repo/blob/:branch/*filepath", get(get_raw_file_github))
         .route("/project/:name", get(get_project_md_legacy))
         .route("/private/project/:name", get(get_private_project_md))
         .route("/healthz", get(healthz))
         .with_state(state);
+        
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await.unwrap();
     println!("lunar-serve listening on http://0.0.0.0:{}", port);
     axum::serve(listener, app).await.unwrap();

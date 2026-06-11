@@ -64,7 +64,6 @@ impl ProjectIndex {
             let github = source.as_ref().and_then(|s| if s.r#type == SourceType::Github { s.github.clone() } else { None });
             let archive_url = source.as_ref().and_then(|s| s.archive_url.clone());
             if let Some(ref gh) = github {
-                // [MODIFIED] Convert key to lowercase to make coordinate matching case-insensitive
                 let key = format!("{}/{}/{}", gh.owner, gh.repo, gh.branch).to_lowercase();
                 by_github_path.insert(key, name.clone());
             }
@@ -74,7 +73,6 @@ impl ProjectIndex {
     }
 
     pub fn get_name_by_github(&self, owner: &str, repo: &str, branch: &str) -> Option<&str> {
-        // [MODIFIED] Lookup coordinate path using case-insensitive lowercase string
         let key = format!("{}/{}/{}", owner, repo, branch).to_lowercase();
         self.by_github_path.get(&key).map(|s| s.as_str())
     }
