@@ -22,11 +22,13 @@ pub struct ProjectSource {
 #[serde(untagged)]
 pub enum ProjectRegistryEntry {
     Simple(String),
+    #[serde(rename_all = "camelCase")]
     Detailed {
         name: String,
         display_name: Option<String>,
         source: Option<ProjectSource>,
         visibility: Option<String>,
+        path: Option<String>,
     },
 }
 
@@ -40,6 +42,7 @@ pub struct ProjectMeta {
     pub github: Option<GithubSource>,
     pub visibility: String,
     pub archive_url: Option<String>,
+    pub path: Option<String>,
 }
 
 pub struct ProjectIndex {
@@ -52,24 +55,28 @@ impl ProjectIndex {
         let mut by_name = HashMap::new();
         let mut by_github_path = HashMap::new();
         for entry in &config.projects {
-            let (name, display, source, visibility) = match entry {
-                ProjectRegistryEntry::Simple(name) => (name.clone(), name.clone(), None, "public".to_string()),
-                ProjectRegistryEntry::Detailed { name, display_name, source, visibility } => {
-                    (name.clone(), display_name.clone().unwrap_or_else(|| name.clone()), source.clone(), visibility.clone().unwrap_or_else(|| "public".to_string()))
+            let (name, display, source, visibility, path) = match entry {
+                ProjectRegistryEntry::Simple(name) => (name.clone(), name.clone(), None, "public".to_string(), None),
+                ProjectRegistryEntry::Detailed { name, display_name, source, visibility, path } => {
+                    (name.clone(), display_name.clone().unwrap_or_else(|| name.clone()), source.clone(), visibility.clone().unwrap_or_else(|| "public".to_string()), path.clone())
                 }
             };
             let github = source.as_ref().and_then(|s| if s.r#type == SourceType::Github { s.github.clone() } else { None });
             let archive_url = source.as_ref().and_then(|s| s.archive_url.clone());
             if let Some(ref gh) = github {
-                by_github_path.insert(format!("{}/{}/{}", gh.owner, gh.repo, gh.branch), name.clone());
+                // [MODIFIED] Convert key to lowercase to make coordinate matching case-insensitive
+                let key = format!("{}/{}/{}", gh.owner, gh.repo, gh.branch).to_lowercase();
+                by_github_path.insert(key, name.clone());
             }
-            by_name.insert(name, ProjectMeta { display_name: display, github, visibility, archive_url });
+            by_name.insert(name, ProjectMeta { display_name: display, github, visibility, archive_url, path });
         }
         Self { by_name, by_github_path }
     }
 
     pub fn get_name_by_github(&self, owner: &str, repo: &str, branch: &str) -> Option<&str> {
-        self.by_github_path.get(&format!("{}/{}/{}", owner, repo, branch)).map(|s| s.as_str())
+        // [MODIFIED] Lookup coordinate path using case-insensitive lowercase string
+        let key = format!("{}/{}/{}", owner, repo, branch).to_lowercase();
+        self.by_github_path.get(&key).map(|s| s.as_str())
     }
 
     pub fn get_meta(&self, name: &str) -> Option<&ProjectMeta> { self.by_name.get(name) }

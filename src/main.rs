@@ -1,20 +1,38 @@
-use axum::{extract::{Path, Query, State}, http::StatusCode, response::Json, routing::get, Router};
+use axum::{
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
+    response::Json,
+    routing::get,
+    Router,
+};
 use lunar::LunarMap;
-use lunar_serve::{ProjectIndex, load_repos, ProjectMeta};
+use lunar_serve::{load_repos, ProjectIndex, ProjectMeta};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-struct AppState { data_path: PathBuf, project_index: ProjectIndex }
+struct AppState {
+    data_path: PathBuf,
+    project_index: ProjectIndex,
+}
 
 #[derive(Deserialize, Default)]
-struct MdQuery { summary: bool, scope: Option<String>, status: Option<String>, path: Option<String>, style: Option<String> }
+struct MdQuery {
+    #[serde(default)]
+    summary: bool,
+    scope: Option<String>,
+    status: Option<String>,
+    path: Option<String>,
+    style: Option<String>,
+}
 
 fn load_map(path: &std::path::Path) -> Result<LunarMap, (StatusCode, String)> {
-    let content = fs::read_to_string(path).map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read lunar-map.json".into()))?;
-    serde_json::from_str(&content).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Invalid JSON: {}", e)))
+    let content = fs::read_to_string(path)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read lunar-map.json".into()))?;
+    serde_json::from_str(&content)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Invalid JSON: {}", e)))
 }
 
 fn render_summary(map: &LunarMap) -> String {
@@ -155,6 +173,106 @@ async fn get_private_project_md(State(state): State<Arc<AppState>>, req: axum::h
 
 async fn healthz() -> &'static str { "OK" }
 
+/// Validates and reads a single file from the workspace, preventing directory traversal.
+/// This conforms to the Google engineering standards for robust security checks.
+fn read_secure_file(base_path_str: &str, relative_path_str: &str) -> Result<String, (StatusCode, String)> {
+    let base_path = std::path::Path::new(base_path_str);
+    let relative_path = std::path::Path::new(relative_path_str);
+
+    // Combine base path and relative path to form the target path
+    let target_path = base_path.join(relative_path);
+
+    // Resolve the absolute canonical path to eliminate symlinks and "/../" bypasses
+    let canonical_target = match target_path.canonicalize() {
+        Ok(path) => path,
+        Err(_) => return Err((StatusCode::NOT_FOUND, "File not found or invalid path".to_string())),
+    };
+
+    // Resolve the canonical project base path for comparison
+    let canonical_base = match base_path.canonicalize() {
+        Ok(path) => path,
+        Err(_) => return Err((StatusCode::INTERNAL_SERVER_ERROR, "Invalid project base path configured".to_string())),
+    };
+
+    // Security boundary: Ensure target path remains strictly inside the base directory
+    if !canonical_target.starts_with(canonical_base) {
+        return Err((StatusCode::FORBIDDEN, "Access denied: Path traversal detected".to_string()));
+    }
+
+    // Read file contents to string
+    std::fs::read_to_string(canonical_target)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read file: {}", e)))
+}
+
+/// Helper function to check if the incoming request is authorized for private repos.
+fn is_authorized(headers: &HeaderMap) -> bool {
+    let auth = headers.get("Authorization").and_then(|v| v.to_str().ok()).unwrap_or_default();
+    auth.starts_with("Bearer ")
+}
+
+/// Endpoint to serve raw file content by project name via standard API.
+/// Path matches: /api/v1/projects/:name/raw/*filepath
+async fn get_raw_file_api(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((name, filepath)): Path<(String, String)>,
+) -> Result<String, (StatusCode, String)> {
+    let name = name.trim_end_matches(".md").trim_end_matches(".json");
+    let map = load_map(&state.data_path)?;
+    let meta = state.project_index.get_meta(&name);
+
+    // Authorization barrier for private projects
+    let visibility = meta.map(|m| m.visibility.as_str()).unwrap_or("public");
+    if visibility == "private" && !is_authorized(&headers) {
+        return Err((StatusCode::UNAUTHORIZED, "Unauthorized access to private workspace".to_string()));
+    }
+
+    // Auto-discover path: 1. check repos.json override, 2. fallback to automated map configuration
+    let base_path = meta.and_then(|m| m.path.as_deref())
+        .map(|p| p.to_string())
+        .or_else(|| {
+            map.projects.iter()
+                .find(|p| p.name.eq_ignore_ascii_case(&name))
+                .and_then(|p| p.path.clone())
+        })
+        .ok_or((StatusCode::BAD_REQUEST, "No physical workspace path mapped for this project".to_string()))?;
+
+    read_secure_file(&base_path, &filepath)
+}
+
+/// Endpoint to serve raw file content mirroring GitHub's URL format.
+/// Path matches: /:owner/:repo/raw/:branch/*filepath
+async fn get_raw_file_github(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((owner, repo, branch, filepath)): Path<(String, String, String, String)>,
+) -> Result<String, (StatusCode, String)> {
+    let branch = branch.trim_end_matches(".md").trim_end_matches(".json");
+    let map = load_map(&state.data_path)?;
+    let name = state.project_index.get_name_by_github(&owner, &repo, &branch)
+        .ok_or((StatusCode::NOT_FOUND, "No project mapped to this GitHub path".to_string()))?;
+
+    let meta = state.project_index.get_meta(name);
+
+    // Authorization barrier for private projects
+    let visibility = meta.map(|m| m.visibility.as_str()).unwrap_or("public");
+    if visibility == "private" && !is_authorized(&headers) {
+        return Err((StatusCode::UNAUTHORIZED, "Unauthorized access to private workspace".to_string()));
+    }
+
+    // Auto-discover path: 1. check repos.json override, 2. fallback to automated map configuration
+    let base_path = meta.and_then(|m| m.path.as_deref())
+        .map(|p| p.to_string())
+        .or_else(|| {
+            map.projects.iter()
+                .find(|p| p.name.eq_ignore_ascii_case(name))
+                .and_then(|p| p.path.clone())
+        })
+        .ok_or((StatusCode::BAD_REQUEST, "No physical workspace path mapped for this project".to_string()))?;
+
+    read_secure_file(&base_path, &filepath)
+}
+
 #[tokio::main]
 async fn main() {
     let port: u16 = std::env::var("LUNAR_SERVE_PORT").unwrap_or_else(|_| "8787".to_string()).parse().unwrap_or(8787);
@@ -169,7 +287,9 @@ async fn main() {
         .route("/lunar-map.json", get(get_json))
         .route("/lunar-map.md", get(get_markdown))
         .route("/api/v1/projects/:name/map", get(get_project_md_api))
+        .route("/api/v1/projects/:name/raw/*filepath", get(get_raw_file_api))
         .route("/:owner/:repo/tree/:branch", get(get_project_md_github))
+        .route("/:owner/:repo/raw/:branch/*filepath", get(get_raw_file_github))
         .route("/project/:name", get(get_project_md_legacy))
         .route("/private/project/:name", get(get_private_project_md))
         .route("/healthz", get(healthz))
