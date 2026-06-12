@@ -7,6 +7,7 @@ use lunar_interface::{AlignmentEntry, LunarMap};
 use lunar_serve::ProjectMeta;
 use crate::utils::{render_directory_tree, render_directory_tree_json};
 use std::collections::HashMap;
+use std::fs;
 
 /// Renders either JSON or Markdown project tree based on the HTTP Accept header.
 pub fn render_negotiated_tree(
@@ -69,7 +70,38 @@ pub fn render_project_md(map: &LunarMap, name: &str, meta: Option<&ProjectMeta>,
     let p = project.unwrap();
     let exp = p.interfaces.as_object().and_then(|i| i.get("exposed")).and_then(|e| e.as_array()).map_or(0, |a| a.len());
     let con = p.interfaces.as_object().and_then(|i| i.get("consumed")).and_then(|e| e.as_array()).map_or(0, |a| a.len());
-    let mut md = format!("# Project: {}\n\n- Type: {}\n- Scan Status: {}\n- Exposed: {}\n- Consumed: {}\n\n", p.name, p.project_type, p.scan_status, exp, con);
+    
+    let base_path = meta.and_then(|m| m.path.as_deref())
+        .map(|p| p.to_string())
+        .or_else(|| {
+            map.projects.iter()
+                .find(|proj| proj.name.eq_ignore_ascii_case(name))
+                .and_then(|proj| proj.path.clone())
+        });
+
+    let mut md = String::new();
+
+    // [DECOUPLED] Read AI Agent System Instruction from local workspace path if available on VPS disk
+    if let Some(ref path) = base_path {
+        let instruction_path = std::path::Path::new(path).join(".lunar/ai-instruction.md");
+        if instruction_path.exists() {
+            if let Ok(inst_content) = fs::read_to_string(&instruction_path) {
+                md.push_str(&inst_content);
+                md.push_str("\n\n---\n\n");
+            }
+        } else {
+            // [FALLBACK] Sane default English AI Instruction matching standard configurations
+            md.push_str("> 🤖 **AI Agent Instruction (LunarAST Decoupled Protocol)**\n");
+            md.push_str(&format!("> You are currently analyzing the codebase of `{}` (from the `CommonIntents` protocol family).\n", name));
+            md.push_str("> 1. To explore the directory layout, inspect the **Workspace File Tree** at the bottom of this page.\n");
+            // [FIXED] Wrapped formatted strings with proper &format!(...) macro calls to fix syntax compilation
+            md.push_str(&format!("> 2. To read any file contents, do NOT guess. Fetch it dynamically on-demand via:\n>    `https://lunar.aifify.com/Jasonmilk/{}/raw/rs2/<filepath>`\n", name));
+            md.push_str(&format!("> 3. Read or update active tasks on the Handover TODO board via:\n>    `https://lunar.aifify.com/api/v1/projects/{}/todo`\n", name.to_lowercase()));
+            md.push_str("\n\n---\n\n");
+        }
+    }
+
+    md.push_str(&format!("# Project: {}\n\n- Type: {}\n- Scan Status: {}\n- Exposed: {}\n- Consumed: {}\n\n", p.name, p.project_type, p.scan_status, exp, con));
     if let Some(interfaces) = p.interfaces.as_object() {
         if let Some(exposed) = interfaces.get("exposed").and_then(|e| e.as_array()) {
             md.push_str("## Exposed Endpoints\n\n| Method | Path |\n|:---|:---|\n");
@@ -93,22 +125,46 @@ pub fn render_project_md(map: &LunarMap, name: &str, meta: Option<&ProjectMeta>,
         }
     }
 
-    let base_path = meta.and_then(|m| m.path.as_deref())
-        .map(|p| p.to_string())
-        .or_else(|| {
-            map.projects.iter()
-                .find(|proj| proj.name.eq_ignore_ascii_case(name))
-                .and_then(|proj| proj.path.clone())
-        });
-
     if let Some(ref path) = base_path {
         let path_obj = std::path::Path::new(path);
         if path_obj.exists() {
+            // Append directory tree
             md.push_str("\n---\n## 📂 Workspace File Tree (AI Navigation Guide)\n\n");
             md.push_str("To view raw file content on-demand, use the `/raw` endpoint matching these paths.\n\n");
             md.push_str("```\n");
+            
+            // Inject dynamic, intuitive `#` header comments right inside the code block
+            md.push_str(&format!("# Repository: Jasonmilk/{}\n", name));
+            md.push_str("# Branch: rs2 (Ecosystem automatic path discovery)\n");
+            md.push_str(&format!("# To read project manual: fetch /raw/rs2/README.md\n"));
+            md.push_str(&format!("# To read any source file: request /raw/rs2/<filepath>\n\n"));
+            
             md.push_str(&render_directory_tree(path));
             md.push_str("```\n");
+
+            // Append Collapsible Handover TODOs at the bottom
+            let todo_path = path_obj.join(".lunar/ai-todo.json");
+            if todo_path.exists() {
+                if let Ok(todo_content) = std::fs::read_to_string(&todo_path) {
+                    if let Ok(todo_val) = serde_json::from_str::<serde_json::Value>(&todo_content) {
+                        if let Some(tasks) = todo_val.get("tasks").and_then(|t| t.as_array()) {
+                            if !tasks.is_empty() {
+                                md.push_str("\n<details>\n<summary>📋 Active Handover TODOs (Click to expand)</summary>\n\n");
+                                md.push_str(&format!("**Project Status**: {}\n", todo_val.get("status").and_then(|s| s.as_str()).unwrap_or("idle")));
+                                md.push_str(&format!("**Last Handover**: {}\n\n", todo_val.get("lastHandover").and_then(|s| s.as_str()).unwrap_or("unknown")));
+                                for task in tasks {
+                                    let task_desc = task.get("task").and_then(|t| t.as_str()).unwrap_or("unknown task");
+                                    let assigned = task.get("assignedTo").and_then(|a| a.as_str()).unwrap_or("unassigned");
+                                    let task_status = task.get("status").and_then(|s| s.as_str()).unwrap_or("pending");
+                                    let checked = if task_status == "completed" || task_status == "done" { "[x]" } else { "[ ]" };
+                                    md.push_str(&format!("- {} **{}** (Assigned: {}, Status: {})\n", checked, task_desc, assigned, task_status));
+                                }
+                                md.push_str("\n</details>\n");
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     md
