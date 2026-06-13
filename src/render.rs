@@ -39,7 +39,7 @@ pub fn render_negotiated_tree(
     }
 
     // Default to highly cohesive Markdown with embedded file tree outline
-    let md = render_project_md(map, name, meta, is_authenticated);
+    let md = render_project_md(headers, map, name, meta, is_authenticated);
     Ok(md.into_response())
 }
 
@@ -64,13 +64,30 @@ pub fn render_summary(map: &LunarMap) -> String {
     md
 }
 
-pub fn render_project_md(map: &LunarMap, name: &str, meta: Option<&ProjectMeta>, is_authenticated: bool) -> String {
+pub fn render_project_md(
+    headers: &HeaderMap,
+    map: &LunarMap,
+    name: &str,
+    meta: Option<&ProjectMeta>,
+    is_authenticated: bool,
+) -> String {
     let project = map.projects.iter().find(|p| p.name.eq_ignore_ascii_case(name));
     if project.is_none() { return format!("# Project `{}` not found.\n", name); }
     let p = project.unwrap();
     let exp = p.interfaces.as_object().and_then(|i| i.get("exposed")).and_then(|e| e.as_array()).map_or(0, |a| a.len());
     let con = p.interfaces.as_object().and_then(|i| i.get("consumed")).and_then(|e| e.as_array()).map_or(0, |a| a.len());
     
+    // [MODIFIED] Section 8.4: Sane declared domain with progressive dynamic sniffing fallback
+    let request_host = std::env::var("LUNAR_SERVE_DOMAIN").ok()
+        .and_then(|d| d.strip_prefix("https://").or_else(|| d.strip_prefix("http://")).map(|s| s.to_string()))
+        .unwrap_or_else(|| {
+            headers.get("Host").and_then(|v| v.to_str().ok()).unwrap_or("127.0.0.1:8787").to_string()
+        });
+        
+    let git_owner = meta.and_then(|m| m.github.as_ref()).map(|g| g.owner.as_str()).unwrap_or("Jasonmilk");
+    let git_repo = meta.and_then(|m| m.github.as_ref()).map(|g| g.repo.as_str()).unwrap_or(name);
+    let git_branch = meta.and_then(|m| m.github.as_ref()).map(|g| g.branch.as_str()).unwrap_or("rs2");
+
     let base_path = meta.and_then(|m| m.path.as_deref())
         .map(|p| p.to_string())
         .or_else(|| {
@@ -81,7 +98,7 @@ pub fn render_project_md(map: &LunarMap, name: &str, meta: Option<&ProjectMeta>,
 
     let mut md = String::new();
 
-    // [DECOUPLED] Read AI Agent System Instruction from local workspace path if available on VPS disk
+    // Read AI Agent System Instruction from local workspace path if available on VPS disk
     if let Some(ref path) = base_path {
         let instruction_path = std::path::Path::new(path).join(".lunar/ai-instruction.md");
         if instruction_path.exists() {
@@ -90,13 +107,12 @@ pub fn render_project_md(map: &LunarMap, name: &str, meta: Option<&ProjectMeta>,
                 md.push_str("\n\n---\n\n");
             }
         } else {
-            // [FALLBACK] Sane default English AI Instruction matching standard configurations
+            // [FALLBACK] Sane default English AI Instruction matching dynamically sniffed host coordinates
             md.push_str("> 🤖 **AI Agent Instruction (LunarAST Decoupled Protocol)**\n");
             md.push_str(&format!("> You are currently analyzing the codebase of `{}` (from the `CommonIntents` protocol family).\n", name));
             md.push_str("> 1. To explore the directory layout, inspect the **Workspace File Tree** at the bottom of this page.\n");
-            // [FIXED] Wrapped formatted strings with proper &format!(...) macro calls to fix syntax compilation
-            md.push_str(&format!("> 2. To read any file contents, do NOT guess. Fetch it dynamically on-demand via:\n>    `https://lunar.aifify.com/Jasonmilk/{}/raw/rs2/<filepath>`\n", name));
-            md.push_str(&format!("> 3. Read or update active tasks on the Handover TODO board via:\n>    `https://lunar.aifify.com/api/v1/projects/{}/todo`\n", name.to_lowercase()));
+            md.push_str(&format!("> 2. To read any file contents, do NOT guess. Fetch it dynamically on-demand via:\n>    `https://{}/{}/{}/raw/{}/<filepath>`\n", request_host, git_owner, git_repo, git_branch));
+            md.push_str(&format!("> 3. Read or update active tasks on the Handover TODO board via:\n>    `https://{}/api/v1/projects/{}/todo`\n", request_host, name.to_lowercase()));
             md.push_str("\n\n---\n\n");
         }
     }
@@ -133,11 +149,11 @@ pub fn render_project_md(map: &LunarMap, name: &str, meta: Option<&ProjectMeta>,
             md.push_str("To view raw file content on-demand, use the `/raw` endpoint matching these paths.\n\n");
             md.push_str("```\n");
             
-            // Inject dynamic, intuitive `#` header comments right inside the code block
-            md.push_str(&format!("# Repository: Jasonmilk/{}\n", name));
-            md.push_str("# Branch: rs2 (Ecosystem automatic path discovery)\n");
-            md.push_str(&format!("# To read project manual: fetch /raw/rs2/README.md\n"));
-            md.push_str(&format!("# To read any source file: request /raw/rs2/<filepath>\n\n"));
+            // Inject dynamic, intuitive `#` header comments with sniffed host coordinates
+            md.push_str(&format!("# Repository: {}/{}\n", git_owner, git_repo));
+            md.push_str(&format!("# Branch: {} (Ecosystem automatic path discovery)\n", git_branch));
+            md.push_str(&format!("# To read project manual: fetch /raw/{}/README.md\n", git_branch));
+            md.push_str(&format!("# To read any source file: request /raw/{}/<filepath>\n\n", git_branch));
             
             md.push_str(&render_directory_tree(path));
             md.push_str("```\n");

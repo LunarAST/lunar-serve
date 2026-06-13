@@ -54,7 +54,7 @@ fn make_error_response(status: StatusCode, error_msg: &str, hint: &str) -> Respo
     response
 }
 
-/// [ADDED] Serves the single-file bundled React Canvas (lunar-scope) natively at root URL.
+/// Serves the single-file bundled React Canvas (lunar-scope) natively at root URL.
 async fn get_index(State(state): State<Arc<AppState>>) -> Result<Html<String>, Response> {
     let base_dir = state.data_path.parent().unwrap_or(std::path::Path::new("/"));
     
@@ -113,7 +113,9 @@ async fn get_markdown(State(state): State<Arc<AppState>>, Query(query): Query<Md
         Err((status, err)) => return Err(make_error_response(status, &err, "Failed to read global lunar-map.json")),
     };
     if query.summary { return Ok(render::render_summary(&map)); }
-    if let Some(ref scope) = query.scope { return Ok(render::render_project_md(&map, scope, state.project_index.get_meta(scope), false)); }
+    if let Some(ref scope) = query.scope { 
+        return Ok(render::render_project_md(&HeaderMap::new(), &map, scope, state.project_index.get_meta(scope), false)); 
+    }
     if let Some(ref status) = query.status { return Ok(render::render_status_filter(&map, status)); }
     if let Some(ref path) = query.path { return Ok(render::render_path_filter(&map, path)); }
     if let Some(ref style) = query.style { if style == "mermaid" { return Ok(render::render_mermaid(&map)); } }
@@ -158,26 +160,38 @@ async fn get_project_md_github(
         Ok(m) => m,
         Err((status, err)) => return Err(make_error_response(status, &err, "Failed to read global lunar-map.json")),
     };
+    
+    // [FALLBACK] Section 3.2: 1. check repos.json, 2. fallback to match repo parameter directly to lunar-map.json (Zero-Config)
     let name = match state.project_index.get_name_by_github(&owner, &repo, &branch) {
-        Some(n) => n,
+        Some(n) => n.to_string(),
         None => {
-            let resp = make_error_response(
-                StatusCode::NOT_FOUND,
-                "No project mapped to this GitHub path",
-                &format!("Verify your repos.json coordinates. Ensure owner '{}', repo '{}' and branch '{}' match.", owner, repo, branch)
-            );
-            utils::write_audit_log("127.0.0.1", &headers, &format!("/{}/{}/tree/{}", owner, repo, branch), "GET", "unknown", None, 404, start.elapsed().as_millis());
-            return Err(resp);
+            let matched_name = map.projects.iter()
+                .find(|p| p.name.eq_ignore_ascii_case(&repo))
+                .map(|p| p.name.clone());
+                
+            match matched_name {
+                Some(n) => n,
+                None => {
+                    let resp = make_error_response(
+                        StatusCode::NOT_FOUND,
+                        "No project mapped to this GitHub path",
+                        &format!("Verify your repos.json coordinates. Ensure owner '{}', repo '{}' and branch '{}' match.", owner, repo, branch)
+                    );
+                    utils::write_audit_log("127.0.0.1", &headers, &format!("/{}/{}/tree/{}", owner, repo, branch), "GET", "unknown", None, 404, start.elapsed().as_millis());
+                    return Err(resp);
+                }
+            }
         }
     };
-    let meta = state.project_index.get_meta(name);
+    
+    let meta = state.project_index.get_meta(&name);
     if query.style.as_deref() == Some("mermaid") { return Ok(render::render_mermaid(&map).into_response()); }
     
-    let resp = render::render_negotiated_tree(&headers, &map, name, meta, false)
+    let resp = render::render_negotiated_tree(&headers, &map, &name, meta, false)
         .map_err(|(status, err)| make_error_response(status, &err, "Failed to render negotiated tree on GitHub coordinates request"));
 
     let status_code = match &resp { Ok(r) => r.status().as_u16(), Err(e) => e.status().as_u16() };
-    utils::write_audit_log("127.0.0.1", &headers, &format!("/{}/{}/tree/{}", owner, repo, branch), "GET", name, None, status_code, start.elapsed().as_millis());
+    utils::write_audit_log("127.0.0.1", &headers, &format!("/{}/{}/tree/{}", owner, repo, branch), "GET", &name, None, status_code, start.elapsed().as_millis());
 
     resp
 }
@@ -295,20 +309,31 @@ async fn get_raw_file_github(
         Ok(m) => m,
         Err((status, err)) => return Err(make_error_response(status, &err, "Failed to read global lunar-map.json")),
     };
+    
+    // [FALLBACK] Section 3.2: 1. check repos.json, 2. fallback to match repo parameter directly to lunar-map.json (Zero-Config)
     let name = match state.project_index.get_name_by_github(&owner, &repo, &branch) {
-        Some(n) => n,
+        Some(n) => n.to_string(),
         None => {
-            let resp = make_error_response(
-                StatusCode::NOT_FOUND,
-                "No project mapped to this GitHub path",
-                &format!("Verify your repos.json coordinates. Ensure owner '{}', repo '{}' and branch '{}' match.", owner, repo, branch)
-            );
-            utils::write_audit_log("127.0.0.1", &headers, &format!("/{}/{}/raw/{}/{}", owner, repo, branch, filepath), "GET", "unknown", Some(&filepath), 404, start.elapsed().as_millis());
-            return Err(resp);
+            let matched_name = map.projects.iter()
+                .find(|p| p.name.eq_ignore_ascii_case(&repo))
+                .map(|p| p.name.clone());
+                
+            match matched_name {
+                Some(n) => n,
+                None => {
+                    let resp = make_error_response(
+                        StatusCode::NOT_FOUND,
+                        "No project mapped to this GitHub path",
+                        &format!("Verify your repos.json coordinates. Ensure owner '{}', repo '{}' and branch '{}' match.", owner, repo, branch)
+                    );
+                    utils::write_audit_log("127.0.0.1", &headers, &format!("/{}/{}/raw/{}/{}", owner, repo, branch, filepath), "GET", "unknown", Some(&filepath), 404, start.elapsed().as_millis());
+                    return Err(resp);
+                }
+            }
         }
     };
 
-    let meta = state.project_index.get_meta(name);
+    let meta = state.project_index.get_meta(&name);
 
     // Authorization barrier for private projects
     let visibility = meta.map(|m| m.visibility.as_str()).unwrap_or("public");
@@ -318,7 +343,7 @@ async fn get_raw_file_github(
             "Unauthorized access",
             "This project is private. Please provide a valid Bearer JWT token in your Authorization header."
         );
-        utils::write_audit_log("127.0.0.1", &headers, &format!("/{}/{}/raw/{}/{}", owner, repo, branch, filepath), "GET", name, Some(&filepath), 401, start.elapsed().as_millis());
+        utils::write_audit_log("127.0.0.1", &headers, &format!("/{}/{}/raw/{}/{}", owner, repo, branch, filepath), "GET", &name, Some(&filepath), 401, start.elapsed().as_millis());
         return Err(resp);
     }
 
@@ -327,7 +352,7 @@ async fn get_raw_file_github(
         .map(|p| p.to_string())
         .or_else(|| {
             map.projects.iter()
-                .find(|p| p.name.eq_ignore_ascii_case(name))
+                .find(|p| p.name.eq_ignore_ascii_case(&name))
                 .and_then(|p| p.path.clone())
         });
         
@@ -339,14 +364,14 @@ async fn get_raw_file_github(
                 "Workspace path missing",
                 &format!("No physical workspace path could be auto-detected or mapped for project '{}'.", name)
             );
-            utils::write_audit_log("127.0.0.1", &headers, &format!("/{}/{}/raw/{}/{}", owner, repo, branch, filepath), "GET", name, Some(&filepath), 400, start.elapsed().as_millis());
+            utils::write_audit_log("127.0.0.1", &headers, &format!("/{}/{}/raw/{}/{}", owner, repo, branch, filepath), "GET", &name, Some(&filepath), 400, start.elapsed().as_millis());
             return Err(resp);
         }
     };
 
     let result = utils::read_secure_file(&base_path, &filepath);
     let status_code = match &result { Ok(_) => 200, Err((status, _, _)) => status.as_u16() };
-    utils::write_audit_log("127.0.0.1", &headers, &format!("/{}/{}/raw/{}/{}", owner, repo, branch, filepath), "GET", name, Some(&filepath), status_code, start.elapsed().as_millis());
+    utils::write_audit_log("127.0.0.1", &headers, &format!("/{}/{}/raw/{}/{}", owner, repo, branch, filepath), "GET", &name, Some(&filepath), status_code, start.elapsed().as_millis());
 
     result
         .map(|content| content.into_response())
