@@ -1,41 +1,36 @@
 use lunar_serve::{ProjectIndex, ReposConfig};
 
-fn make_repos_json() -> String {
-    r#"{
-        "version": "0.5.0",
-        "projects": [
-            {
-                "name": "public-svc",
-                "source": { "type": "local", "archiveUrl": "https://r2.example.com/archives/public-svc.tar.gz" },
-                "visibility": "public"
-            },
-            {
-                "name": "private-svc",
-                "source": { "type": "local", "archiveUrl": "https://r2.example.com/archives/private-svc.tar.gz" },
-                "visibility": "private"
-            },
-            {
-                "name": "no-archive-svc",
-                "source": { "type": "local" },
-                "visibility": "public"
-            }
-        ]
-    }"#.to_string()
-}
-
 #[test]
-fn test_archive_url_parsed_correctly() {
-    let config: ReposConfig = serde_json::from_str(&make_repos_json()).unwrap();
+fn test_repos_config_deserialization_and_normalization() {
+    let json_str = r#"{
+      "version": "0.5.0",
+      "projects": [
+        {
+          "name": "cellrix",
+          "displayName": "Cellrix",
+          "source": {
+            "type": "github",
+            "github": {
+              "owner": "Jasonmilk",
+              "repo": "Cellrix",
+              "branch": "rs2"
+            }
+          },
+          "visibility": "public",
+          "path": "/opt/cellrix"
+        }
+      ]
+    }"#;
+    let config: Result<ReposConfig, _> = serde_json::from_str(json_str);
+    assert!(config.is_ok());
+    let config = config.unwrap();
+    assert_eq!(config.version, "0.5.0");
+    
     let index = ProjectIndex::from_config(&config);
-
-    let public_meta = index.get_meta("public-svc").unwrap();
-    assert_eq!(public_meta.visibility, "public");
-    assert!(public_meta.archive_url.is_some());
-
-    let private_meta = index.get_meta("private-svc").unwrap();
-    assert_eq!(private_meta.visibility, "private");
-    assert!(private_meta.archive_url.is_some());
-
-    let no_archive_meta = index.get_meta("no-archive-svc").unwrap();
-    assert!(no_archive_meta.archive_url.is_none());
+    let name = index.get_name_by_github("Jasonmilk", "Cellrix", "rs2");
+    assert_eq!(name, Some("cellrix"));
+    
+    // [ADDED v3.0] Test case-insensitive resolution of HTTP GitHub Coordinates
+    let name_lower = index.get_name_by_github("jasonmilk", "cellrix", "rs2");
+    assert_eq!(name_lower, Some("cellrix"));
 }
