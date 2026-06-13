@@ -1,1 +1,36 @@
+# LunarAST tool repository .gitignore (unified)
+
+# Rust build artifacts
 /target
+Cargo.lock
+
+# Generated files
+lunar-map.json
+.lunar/
+
+# Node.js / frontend (for lunar-scope)
+node_modules/
+dist/
+dist-ssr/
+build/
+*.log
+npm-debug.log*
+
+# Environment variables (sensitive)
+.env
+.env.*
+*.local
+
+# Test coverage
+coverage/
+*.tsbuildinfo
+
+# Editor and system files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+lunar-map.json
