@@ -3,7 +3,7 @@ use axum::{
     http::HeaderMap,
     response::{IntoResponse, Response, Json, Html},
 };
-use lunar_serve::{AppState, ProjectMeta, make_error_response, load_map, write_audit_log, is_authorized};
+use lunar_serve::{AppState, make_error_response, load_map, write_audit_log};
 use lunar_serve::render;
 use serde::Deserialize;
 use std::fs;

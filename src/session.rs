@@ -72,3 +72,63 @@ pub fn spawn_cleanup_task() {
         }
     });
 }
+
+/// Clear all sessions (used for testing).
+pub fn clear_all_sessions() {
+    store().write().unwrap().clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_create_and_validate_session() {
+        clear_all_sessions();
+        let (sid, csrf) = create_session();
+        assert!(!sid.is_empty());
+        assert!(!csrf.is_empty());
+        let stored_csrf = validate_session(&sid);
+        assert_eq!(stored_csrf, Some(csrf));
+    }
+
+    #[test]
+    fn test_invalidate_session() {
+        clear_all_sessions();
+        let (sid, _) = create_session();
+        invalidate_session(&sid);
+        assert!(validate_session(&sid).is_none());
+    }
+
+    #[test]
+    fn test_expired_session_not_valid() {
+        clear_all_sessions();
+        let (sid, _) = create_session();
+        // Manually set created_at to 25 hours ago by manipulating the store
+        {
+            let mut store = store().write().unwrap();
+            if let Some(meta) = store.get_mut(&sid) {
+                meta.created_at = Instant::now() - Duration::from_secs(90000); // 25h
+            }
+        }
+        assert!(validate_session(&sid).is_none());
+    }
+
+    #[test]
+    fn test_cleanup_removes_expired() {
+        clear_all_sessions();
+        let (sid1, _) = create_session();
+        let (sid2, _) = create_session();
+        // Make sid1 expired
+        {
+            let mut store = store().write().unwrap();
+            if let Some(meta) = store.get_mut(&sid1) {
+                meta.created_at = Instant::now() - Duration::from_secs(90000);
+            }
+        }
+        // Run cleanup
+        store().write().unwrap().retain(|_, meta| meta.created_at.elapsed() < Duration::from_secs(86400));
+        assert!(validate_session(&sid1).is_none());
+        assert!(validate_session(&sid2).is_some());
+    }
+}

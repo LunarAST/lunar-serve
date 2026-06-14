@@ -1,7 +1,7 @@
 //! Parses AI-generated patches in LunarAST patch block format.
 
 /// Structured representation of a parsed patch.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ParsedPatch {
     pub patch_type: String,
     pub ai_agent: String,
@@ -55,4 +55,45 @@ pub fn parse_lunar_patch(text: &str) -> Option<ParsedPatch> {
     }
 
     Some(ParsedPatch { patch_type, ai_agent, session_context, timestamp, content })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_valid_patch() {
+        let input = "---LUNAR_PATCH_START---
+type: code_patch
+ai_agent: deepseek-chat
+session_context: fix off-by-one
+timestamp: 2026-01-01T00:00:00Z
+---CONTENT---
+diff --git a/lib.rs b/lib.rs
++ fix
+---LUNAR_PATCH_END---";
+        let patch = parse_lunar_patch(input).unwrap();
+        assert_eq!(patch.patch_type, "code_patch");
+        assert_eq!(patch.ai_agent, "deepseek-chat");
+        assert_eq!(patch.content, "diff --git a/lib.rs b/lib.rs\n+ fix");
+    }
+
+    #[test]
+    fn test_parse_missing_type_returns_none() {
+        let input = "---LUNAR_PATCH_START---
+ai_agent: bot
+---CONTENT---
+patch
+---LUNAR_PATCH_END---";
+        assert!(parse_lunar_patch(input).is_none());
+    }
+
+    #[test]
+    fn test_parse_no_end_tag_returns_none() {
+        let input = "---LUNAR_PATCH_START---
+type: patch
+---CONTENT---
+patch";
+        assert!(parse_lunar_patch(input).is_none());
+    }
 }

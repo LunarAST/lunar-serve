@@ -80,3 +80,78 @@ pub fn load_signing_key(path: &str) -> Result<SigningKey, String> {
     arr.copy_from_slice(&seed);
     Ok(SigningKey::from_bytes(&arr))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::rngs::OsRng;
+    use rand::RngCore;
+
+    fn gen_keypair() -> (SigningKey, VerifyingKey) {
+        let mut seed = [0u8; 32];
+        OsRng.fill_bytes(&mut seed);
+        let signing = SigningKey::from_bytes(&seed);
+        let verifying = signing.verifying_key();
+        (signing, verifying)
+    }
+
+    #[test]
+    fn test_generate_and_verify_valid_token() {
+        let (sk, vk) = gen_keypair();
+        let payload = LctPayload {
+            exp: Utc::now().timestamp() as u64 + 3600,
+            owner: "me".into(),
+            repo: "test".into(),
+            branch: "main".into(),
+            scope: "readonly".into(),
+        };
+        let token = generate_lct(&payload, &sk).unwrap();
+        let result = verify_lct(&token, &vk, None, None, None).unwrap();
+        assert_eq!(result.owner, "me");
+    }
+
+    #[test]
+    fn test_expired_token_rejected() {
+        let (sk, vk) = gen_keypair();
+        let payload = LctPayload {
+            exp: Utc::now().timestamp() as u64 - 1, // expired
+            owner: "me".into(),
+            repo: "test".into(),
+            branch: "main".into(),
+            scope: "readonly".into(),
+        };
+        let token = generate_lct(&payload, &sk).unwrap();
+        assert!(verify_lct(&token, &vk, None, None, None).is_err());
+    }
+
+    #[test]
+    fn test_resource_binding_rejects_mismatch() {
+        let (sk, vk) = gen_keypair();
+        let payload = LctPayload {
+            exp: Utc::now().timestamp() as u64 + 3600,
+            owner: "me".into(),
+            repo: "A".into(),
+            branch: "main".into(),
+            scope: "readonly".into(),
+        };
+        let token = generate_lct(&payload, &sk).unwrap();
+        // Try to use for repo B
+        assert!(verify_lct(&token, &vk, Some("me"), Some("B"), None).is_err());
+    }
+
+    #[test]
+    fn test_wrong_signature_rejected() {
+        let (_, vk1) = gen_keypair();
+        let (sk2, _) = gen_keypair();
+        let payload = LctPayload {
+            exp: Utc::now().timestamp() as u64 + 3600,
+            owner: "me".into(),
+            repo: "test".into(),
+            branch: "main".into(),
+            scope: "readonly".into(),
+        };
+        // Sign with sk2 but verify with vk1
+        let token = generate_lct(&payload, &sk2).unwrap();
+        assert!(verify_lct(&token, &vk1, None, None, None).is_err());
+    }
+}
