@@ -13,3 +13,10 @@ serde_yaml = "0.9"
 lunar-interface = { path = "../lunar-interface" }
 tower-http = { version = "0.5", features = ["cors"] }
 chrono = { version = "0.4", features = ["serde"] }
+
+# v3.0 Security Dependencies
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+totp-lite = "2.0"
+rand = "0.8"
+base64 = "0.21"
+sha2 = "0.10"

@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// ---------------------------------------------------------------------------
+// Original types (unchanged)
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum SourceType { Github, Local }
@@ -89,3 +93,22 @@ pub fn load_repos(base_dir: &std::path::Path) -> ReposConfig {
     }
     ReposConfig { version: "0.5.0".to_string(), projects: vec![] }
 }
+
+// ---------------------------------------------------------------------------
+// v3.0 Security modules – re-exported for main.rs convenience
+// ---------------------------------------------------------------------------
+
+pub mod session;
+pub mod lct;
+pub mod totp;
+pub mod rate_limiter;
+pub mod patch;
+pub mod utils;
+
+// Re-export the most-used items so main.rs can just `use lunar_serve::*`
+pub use session::{create_session, validate_session, invalidate_session, spawn_cleanup_task};
+pub use lct::{LctPayload, generate_lct, verify_lct, load_signing_key};
+pub use totp::verify_totp;
+pub use rate_limiter::{check as check_rate_limit, record_failure};
+pub use patch::{parse_lunar_patch, ParsedPatch};
+pub use utils::*;

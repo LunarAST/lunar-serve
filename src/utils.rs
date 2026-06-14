@@ -272,7 +272,6 @@ pub fn write_audit_log(
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_file_path) {
         if let Ok(line) = serde_json::to_string(&log_entry) {
             let _ = writeln!(file, "{}", line);
-            // [ADDED] Print structured JSONL entry in real-time to stdout for terminal observability
             println!("{}", line);
         }
     }
@@ -319,4 +318,16 @@ impl NaiveDate {
     fn parse_from_str(s: &str, fmt: &str) -> Result<chrono::NaiveDate, chrono::ParseError> {
         chrono::NaiveDate::parse_from_str(s, fmt)
     }
+}
+
+/// Decode a hex string into bytes (used by lct module).
+pub fn hex_decode(hex_str: &str) -> Result<Vec<u8>, String> {
+    let hex_str = hex_str.trim();
+    if hex_str.len() % 2 != 0 {
+        return Err("Odd hex string length".into());
+    }
+    (0..hex_str.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex_str[i..i+2], 16).map_err(|e| e.to_string()))
+        .collect()
 }
