@@ -4,8 +4,7 @@ use axum::{
     Json,
 };
 use lunar_interface::{AlignmentEntry, LunarMap};
-use lunar_serve::ProjectMeta;
-use crate::utils::{render_directory_tree, render_directory_tree_json};
+use crate::{ProjectMeta, utils::{render_directory_tree, render_directory_tree_json}};
 use std::collections::HashMap;
 use std::fs;
 
@@ -20,7 +19,7 @@ pub fn render_negotiated_tree(
     let accept_header = headers.get("Accept").and_then(|v| v.to_str().ok()).unwrap_or("");
 
     // Resolve base path via secondary fallback strategy
-    let base_path = meta.and_then(|m| m.path.as_deref())
+    let base_path: Option<String> = meta.and_then(|m| m.path.as_deref())
         .map(|p| p.to_string())
         .or_else(|| {
             map.projects.iter()
@@ -77,7 +76,6 @@ pub fn render_project_md(
     let exp = p.interfaces.as_object().and_then(|i| i.get("exposed")).and_then(|e| e.as_array()).map_or(0, |a| a.len());
     let con = p.interfaces.as_object().and_then(|i| i.get("consumed")).and_then(|e| e.as_array()).map_or(0, |a| a.len());
     
-    // [MODIFIED] Section 8.4: Sane declared domain with progressive dynamic sniffing fallback
     let request_host = std::env::var("LUNAR_SERVE_DOMAIN").ok()
         .and_then(|d| d.strip_prefix("https://").or_else(|| d.strip_prefix("http://")).map(|s| s.to_string()))
         .unwrap_or_else(|| {
@@ -88,7 +86,7 @@ pub fn render_project_md(
     let git_repo = meta.and_then(|m| m.github.as_ref()).map(|g| g.repo.as_str()).unwrap_or(name);
     let git_branch = meta.and_then(|m| m.github.as_ref()).map(|g| g.branch.as_str()).unwrap_or("rs2");
 
-    let base_path = meta.and_then(|m| m.path.as_deref())
+    let base_path: Option<String> = meta.and_then(|m| m.path.as_deref())
         .map(|p| p.to_string())
         .or_else(|| {
             map.projects.iter()
@@ -107,7 +105,6 @@ pub fn render_project_md(
                 md.push_str("\n\n---\n\n");
             }
         } else {
-            // [FALLBACK] Sane default English AI Instruction matching dynamically sniffed host coordinates
             md.push_str("> 🤖 **AI Agent Instruction (LunarAST Decoupled Protocol)**\n");
             md.push_str(&format!("> You are currently analyzing the codebase of `{}` (from the `CommonIntents` protocol family).\n", name));
             md.push_str("> 1. To explore the directory layout, inspect the **Workspace File Tree** at the bottom of this page.\n");
@@ -144,21 +141,16 @@ pub fn render_project_md(
     if let Some(ref path) = base_path {
         let path_obj = std::path::Path::new(path);
         if path_obj.exists() {
-            // Append directory tree
             md.push_str("\n---\n## 📂 Workspace File Tree (AI Navigation Guide)\n\n");
             md.push_str("To view raw file content on-demand, use the `/raw` endpoint matching these paths.\n\n");
             md.push_str("```\n");
-            
-            // Inject dynamic, intuitive `#` header comments with sniffed host coordinates
             md.push_str(&format!("# Repository: {}/{}\n", git_owner, git_repo));
             md.push_str(&format!("# Branch: {} (Ecosystem automatic path discovery)\n", git_branch));
             md.push_str(&format!("# To read project manual: fetch /raw/{}/README.md\n", git_branch));
             md.push_str(&format!("# To read any source file: request /raw/{}/<filepath>\n\n", git_branch));
-            
             md.push_str(&render_directory_tree(path));
             md.push_str("```\n");
 
-            // Append Collapsible Handover TODOs at the bottom
             let todo_path = path_obj.join(".lunar/ai-todo.json");
             if todo_path.exists() {
                 if let Ok(todo_content) = std::fs::read_to_string(&todo_path) {

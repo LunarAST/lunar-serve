@@ -1,0 +1,40 @@
+# =======================================================
+# LunarAST Project .gitignore (v1.6)
+# =======================================================
+
+# 物理事实缓存（自动生成）
+# Physical facts cache (auto-generated)
+.lunar/.interfaces-autogen.json
+
+# 自动备份目录（sync --apply 时创建）
+# Backup directory (created by sync --apply)
+.lunar/.backup/
+
+# AI/人工补丁暂存目录
+# Staging directory for AI/human contract patches
+.lunar/suggestions/
+
+# 审计日志与任务归档
+# Audit logs and task archive
+.lunar/access-logs/
+
+# -------------------------------------------------------
+# 说明：
+# .lunar/interfaces.yml 必须提交，不在此忽略列表中。
+# .lunar/interfaces.yml is mandatory and is NOT ignored.
+# 
+# .lunar/ai-todo.json 默认会被 Git 跟踪（便于跨环境共享待办）。
+# .lunar/ai-todo.json is tracked by default (for sharing across environments).
+# 如需忽略（例如单人开发），请取消下面一行的注释。
+# If you want to ignore it (e.g. single developer), uncomment the line below.
+# -------------------------------------------------------
+# .lunar/ai-todo.json
+
+# -------------------------------------------------------
+# 其他常见的构建/临时文件（可选）
+# Other common build/temp files (optional)
+# -------------------------------------------------------
+/target
+**/*.rs.bk
+**/*.swp
+.DS_Store

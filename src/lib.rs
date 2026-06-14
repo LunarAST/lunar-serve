@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use ed25519_dalek::SigningKey;
+use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
-// Original types (unchanged)
+// Original types
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -95,7 +97,7 @@ pub fn load_repos(base_dir: &std::path::Path) -> ReposConfig {
 }
 
 // ---------------------------------------------------------------------------
-// v3.0 Security modules – re-exported for main.rs convenience
+// v3.0 Security modules – re-exported for convenience
 // ---------------------------------------------------------------------------
 
 pub mod session;
@@ -104,11 +106,44 @@ pub mod totp;
 pub mod rate_limiter;
 pub mod patch;
 pub mod utils;
+pub mod render;
 
-// Re-export the most-used items so main.rs can just `use lunar_serve::*`
 pub use session::{create_session, validate_session, invalidate_session, spawn_cleanup_task};
 pub use lct::{LctPayload, generate_lct, verify_lct, load_signing_key};
 pub use totp::verify_totp;
 pub use rate_limiter::{check as check_rate_limit, record_failure};
 pub use patch::{parse_lunar_patch, ParsedPatch};
 pub use utils::*;
+
+// ---------------------------------------------------------------------------
+// Shared application state (used by all route handlers)
+// ---------------------------------------------------------------------------
+
+pub struct AppState {
+    pub data_path: PathBuf,
+    pub project_index: ProjectIndex,
+    pub signing_key: SigningKey,
+}
+
+// ---------------------------------------------------------------------------
+// Shared helper functions (used across handler modules)
+// ---------------------------------------------------------------------------
+
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response, Json};
+
+pub fn make_error_response(status: StatusCode, error_msg: &str, hint: &str) -> Response {
+    let body = serde_json::json!({ "error": error_msg, "hint": hint });
+    let mut resp = (status, Json(body)).into_response();
+    resp.headers_mut().insert("X-Lunar-Diagnostic", axum::http::HeaderValue::from_str(hint).unwrap_or(axum::http::HeaderValue::from_static("error")));
+    resp
+}
+
+use lunar_interface::LunarMap;
+
+pub fn load_map(path: &std::path::Path) -> Result<LunarMap, (StatusCode, String)> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read lunar-map.json".into()))?;
+    serde_json::from_str(&content)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Invalid JSON: {}", e)))
+}
