@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
-    http::{HeaderMap, header},
+    http::{HeaderMap, header, StatusCode},
     response::{IntoResponse, Response, Json},
 };
 use lunar_serve::{
@@ -26,25 +26,65 @@ fn extract_session_id(headers: &HeaderMap) -> Option<String> {
         }))
 }
 
-pub async fn handle_setup(State(_state): State<Arc<AppState>>) -> Result<Response, Response> {
+// ---- /setup GET ----
+pub async fn handle_setup(
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    let session_id = extract_session_id(&headers).unwrap_or_default();
+    if validate_session(&session_id).is_none() {
+        return Err(make_error_response(StatusCode::UNAUTHORIZED, "Login required", ""));
+    }
     let secret_path = ".lunar/totp.secret";
-    if std::path::Path::new(secret_path).exists() {
-        let secret = fs::read_to_string(secret_path)
-            .map_err(|e| make_error_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Read secret error", &e.to_string()))?;
-        let secret = secret.trim();
-        let uri = format!("otpauth://totp/LunarAST?secret={}&issuer=LunarAST&digits=6", secret);
-        return Ok(Json(serde_json::json!({ "message": "TOTP already configured", "otpauth_uri": uri })).into_response());
+    if !std::path::Path::new(secret_path).exists() {
+        return Ok(Json(serde_json::json!({
+            "configured": false,
+            "message": "TOTP not initialized. Run 'lunar setup-totp' on the server."
+        })).into_response());
+    }
+    let secret = fs::read_to_string(secret_path)
+        .map_err(|e| make_error_response(StatusCode::INTERNAL_SERVER_ERROR, "Read secret error", &e.to_string()))?;
+    let secret = secret.trim();
+    let uri = format!("otpauth://totp/LunarAST?secret={}&issuer=LunarAST&digits=6", secret);
+    Ok(Json(serde_json::json!({ "configured": true, "otpauth_uri": uri })).into_response())
+}
+
+// ---- /setup POST ----
+#[derive(Deserialize)]
+pub struct SetupResetRequest { pub totp: String }
+
+pub async fn handle_setup_post(
+    headers: HeaderMap,
+    Json(body): Json<SetupResetRequest>,
+) -> Result<Response, Response> {
+    let ip = headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok()).unwrap_or("127.0.0.1");
+    if let Err(reason) = check_rate_limit(ip, 5, 15, 900) {
+        return Err(make_error_response(StatusCode::TOO_MANY_REQUESTS, &reason, ""));
+    }
+    let session_id = extract_session_id(&headers).unwrap_or_default();
+    let csrf_token = headers.get("X-CSRF-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let stored_csrf = validate_session(&session_id).ok_or_else(|| make_error_response(StatusCode::UNAUTHORIZED, "Invalid session", ""))?;
+    if stored_csrf != csrf_token {
+        return Err(make_error_response(StatusCode::FORBIDDEN, "CSRF token mismatch", ""));
+    }
+    let secret_path = ".lunar/totp.secret";
+    let current_secret = fs::read_to_string(secret_path)
+        .map_err(|_| make_error_response(StatusCode::NOT_FOUND, "No existing TOTP configuration", ""))?;
+    let current_secret = current_secret.trim();
+    let expected = totp_lite::totp::<totp_lite::Sha1>(current_secret.as_bytes(), Utc::now().timestamp() as u64);
+    if expected != body.totp {
+        record_failure(ip, 5, 15, 900);
+        return Err(make_error_response(StatusCode::UNAUTHORIZED, "Invalid current TOTP", ""));
     }
     let mut seed = [0u8; 20];
     OsRng.fill_bytes(&mut seed);
-    let secret = data_encoding::BASE32_NOPAD.encode(&seed);
-    if let Some(parent) = std::path::Path::new(secret_path).parent() { let _ = fs::create_dir_all(parent); }
-    fs::write(secret_path, &secret)
-        .map_err(|e| make_error_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Write secret error", &e.to_string()))?;
-    let uri = format!("otpauth://totp/LunarAST?secret={}&issuer=LunarAST&digits=6", secret);
-    Ok(Json(serde_json::json!({ "message": "TOTP secret generated", "otpauth_uri": uri })).into_response())
+    let new_secret = data_encoding::BASE32_NOPAD.encode(&seed);
+    fs::write(secret_path, &new_secret)
+        .map_err(|e| make_error_response(StatusCode::INTERNAL_SERVER_ERROR, "Write error", &e.to_string()))?;
+    let uri = format!("otpauth://totp/LunarAST?secret={}&issuer=LunarAST&digits=6", new_secret);
+    Ok(Json(serde_json::json!({ "message": "TOTP secret rotated", "otpauth_uri": uri })).into_response())
 }
 
+// ---- /login ----
 #[derive(Deserialize)]
 pub struct LoginRequest { pub totp: String }
 
@@ -55,7 +95,7 @@ pub async fn handle_login(
 ) -> Result<Response, Response> {
     let ip = headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok()).unwrap_or("127.0.0.1");
     if let Err(reason) = check_rate_limit(ip, 5, 15, 900) {
-        return Err(make_error_response(axum::http::StatusCode::TOO_MANY_REQUESTS, &reason, ""));
+        return Err(make_error_response(StatusCode::TOO_MANY_REQUESTS, &reason, ""));
     }
     match verify_totp(&body.totp) {
         Ok(true) => {
@@ -67,11 +107,11 @@ pub async fn handle_login(
         }
         Ok(false) => {
             record_failure(ip, 5, 15, 900);
-            Err(make_error_response(axum::http::StatusCode::UNAUTHORIZED, "Invalid TOTP", "Check authenticator."))
+            Err(make_error_response(StatusCode::UNAUTHORIZED, "Invalid TOTP", "Check authenticator."))
         }
         Err(e) => {
             record_failure(ip, 5, 15, 900);
-            Err(make_error_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "TOTP error", &e))
+            Err(make_error_response(StatusCode::INTERNAL_SERVER_ERROR, "TOTP error", &e))
         }
     }
 }
@@ -80,7 +120,7 @@ pub async fn handle_csrf_token(headers: HeaderMap) -> Result<Response, Response>
     let session_id = extract_session_id(&headers).unwrap_or_default();
     match validate_session(&session_id) {
         Some(csrf_token) => Ok(Json(serde_json::json!({ "csrf_token": csrf_token })).into_response()),
-        None => Err(make_error_response(axum::http::StatusCode::UNAUTHORIZED, "Invalid session", "Login again.")),
+        None => Err(make_error_response(StatusCode::UNAUTHORIZED, "Invalid session", "Login again.")),
     }
 }
 
@@ -94,14 +134,14 @@ pub async fn handle_token_generate(
 ) -> Result<Response, Response> {
     let session_id = extract_session_id(&headers).unwrap_or_default();
     let csrf_token = headers.get("X-CSRF-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
-    let stored_csrf = validate_session(&session_id).ok_or_else(|| make_error_response(axum::http::StatusCode::UNAUTHORIZED, "Invalid session", ""))?;
+    let stored_csrf = validate_session(&session_id).ok_or_else(|| make_error_response(StatusCode::UNAUTHORIZED, "Invalid session", ""))?;
     if stored_csrf != csrf_token {
-        return Err(make_error_response(axum::http::StatusCode::FORBIDDEN, "CSRF token mismatch", "Reload page."));
+        return Err(make_error_response(StatusCode::FORBIDDEN, "CSRF token mismatch", ""));
     }
     let exp = Utc::now().timestamp() as u64 + (body.duration_minutes * 60);
     let payload = LctPayload { exp, owner: body.owner.clone(), repo: body.repo.clone(), branch: body.branch.clone(), scope: "readonly".into() };
     let token = generate_lct(&payload, &state.signing_key)
-        .map_err(|e| make_error_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Token generation error", &e))?;
+        .map_err(|e| make_error_response(StatusCode::INTERNAL_SERVER_ERROR, "Token generation error", &e))?;
     let base_url = std::env::var("LUNAR_SERVE_DOMAIN").unwrap_or_else(|_| "http://localhost:8787".into());
     let url = format!("{}/t/{}/{}/{}/tree/{}", base_url.trim_end_matches('/'), token, body.owner, body.repo, body.branch);
     Ok(Json(serde_json::json!({ "token": token, "url": url, "expires_at": exp })).into_response())
@@ -117,23 +157,23 @@ pub async fn handle_dispatch(
 ) -> Result<Response, Response> {
     let ip = headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok()).unwrap_or("127.0.0.1");
     if let Err(reason) = check_rate_limit(ip, 5, 15, 900) {
-        return Err(make_error_response(axum::http::StatusCode::TOO_MANY_REQUESTS, &reason, ""));
+        return Err(make_error_response(StatusCode::TOO_MANY_REQUESTS, &reason, ""));
     }
     let session_id = extract_session_id(&headers).unwrap_or_default();
     let csrf_token = headers.get("X-CSRF-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
-    let stored_csrf = validate_session(&session_id).ok_or_else(|| make_error_response(axum::http::StatusCode::UNAUTHORIZED, "Invalid session", ""))?;
+    let stored_csrf = validate_session(&session_id).ok_or_else(|| make_error_response(StatusCode::UNAUTHORIZED, "Invalid session", ""))?;
     if stored_csrf != csrf_token {
-        return Err(make_error_response(axum::http::StatusCode::FORBIDDEN, "CSRF token mismatch", ""));
+        return Err(make_error_response(StatusCode::FORBIDDEN, "CSRF token mismatch", ""));
     }
     match verify_totp(&body.totp) {
         Ok(true) => {},
         Ok(false) => {
             record_failure(ip, 5, 15, 900);
-            return Err(make_error_response(axum::http::StatusCode::UNAUTHORIZED, "Invalid TOTP", ""));
+            return Err(make_error_response(StatusCode::UNAUTHORIZED, "Invalid TOTP", ""));
         }
         Err(e) => {
             record_failure(ip, 5, 15, 900);
-            return Err(make_error_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "TOTP error", &e));
+            return Err(make_error_response(StatusCode::INTERNAL_SERVER_ERROR, "TOTP error", &e));
         }
     }
     let parsed = parse_lunar_patch(&body.patch_content);
@@ -145,7 +185,7 @@ pub async fn handle_dispatch(
     let filename = format!("{}-{}-ai.yaml", timestamp, patch_type);
     let staging_path = std::path::Path::new(staging_dir).join(&filename);
     fs::write(&staging_path, &body.patch_content)
-        .map_err(|e| make_error_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Save patch error", &e.to_string()))?;
+        .map_err(|e| make_error_response(StatusCode::INTERNAL_SERVER_ERROR, "Save patch error", &e.to_string()))?;
     write_audit_log(ip, &headers, "/dispatch", "POST", "staging", Some(&filename), 200, 0);
     Ok(Json(serde_json::json!({ "status": "staged", "file": filename, "ai_agent": ai_agent })).into_response())
 }
@@ -159,11 +199,11 @@ pub async fn handle_ai_readonly_tree(
     let start = Instant::now();
     let verifying_key = state.signing_key.verifying_key();
     let _lct = verify_lct(&token, &verifying_key, Some(&owner), Some(&repo), Some(&branch))
-        .map_err(|e| make_error_response(axum::http::StatusCode::UNAUTHORIZED, &format!("Invalid token: {}", e), "Check LCT."))?;
+        .map_err(|e| make_error_response(StatusCode::UNAUTHORIZED, &format!("Invalid token: {}", e), "Check LCT."))?;
     let map = load_map(&state.data_path).map_err(|(s,e)| make_error_response(s, &e, ""))?;
     let name = state.project_index.get_name_by_github(&owner, &repo, &branch)
         .or_else(|| map.projects.iter().find(|p| p.name.eq_ignore_ascii_case(&repo)).map(|p| p.name.as_str()))
-        .ok_or_else(|| make_error_response(axum::http::StatusCode::NOT_FOUND, "Project not found", "Check owner/repo/branch."))?;
+        .ok_or_else(|| make_error_response(StatusCode::NOT_FOUND, "Project not found", "Check owner/repo/branch."))?;
     let meta = state.project_index.get_meta(name);
     let resp = render::render_negotiated_tree(&headers, &map, name, meta, false)
         .map_err(|(status, err)| make_error_response(status, &err, ""));

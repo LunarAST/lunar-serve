@@ -23,7 +23,7 @@ use handlers::{
     healthz,
     get_raw_file_api, get_raw_file_github,
     get_project_todo, post_project_todo, get_project_todo_diff,
-    handle_setup, handle_login, handle_csrf_token,
+    handle_setup, handle_setup_post, handle_login, handle_csrf_token,
     handle_token_generate, handle_dispatch,
     handle_ai_readonly_tree,
 };
@@ -68,7 +68,7 @@ async fn main() {
         .route("/private/project/:name", get(get_private_project_md))
         .route("/healthz", get(healthz))
         // v3.0 Security routes
-        .route("/setup", get(handle_setup))
+        .route("/setup", get(handle_setup).post(handle_setup_post))
         .route("/login", post(handle_login))
         .route("/csrf-token", get(handle_csrf_token))
         .route("/token/generate", post(handle_token_generate))
