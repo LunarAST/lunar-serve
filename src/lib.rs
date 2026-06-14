@@ -107,6 +107,7 @@ pub mod rate_limiter;
 pub mod patch;
 pub mod utils;
 pub mod render;
+pub mod handlers; // <--- ADDED: handlers as a library module
 
 pub use session::{create_session, validate_session, invalidate_session, spawn_cleanup_task};
 pub use lct::{LctPayload, generate_lct, verify_lct, load_signing_key};
@@ -146,4 +147,49 @@ pub fn load_map(path: &std::path::Path) -> Result<LunarMap, (StatusCode, String)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read lunar-map.json".into()))?;
     serde_json::from_str(&content)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Invalid JSON: {}", e)))
+}
+
+// ---------------------------------------------------------------------------
+// Application router builder (extracted so integration tests can use it)
+// ---------------------------------------------------------------------------
+
+use axum::{routing::{get, post}, Router};
+use std::sync::Arc;
+
+pub fn build_app(state: Arc<AppState>) -> Router {
+    use crate::handlers::{
+        get_index, get_json, get_markdown,
+        get_project_md_api, get_project_md_github,
+        get_project_md_legacy, get_private_project_md,
+        healthz,
+        get_raw_file_api, get_raw_file_github,
+        get_project_todo, post_project_todo, get_project_todo_diff,
+        handle_setup, handle_setup_post, handle_login, handle_csrf_token,
+        handle_token_generate, handle_dispatch,
+        handle_ai_readonly_tree,
+    };
+
+    Router::new()
+        .route("/", get(get_index))
+        .route("/lunar-map.json", get(get_json))
+        .route("/lunar-map.md", get(get_markdown))
+        .route("/api/v1/projects/:name/map", get(get_project_md_api))
+        .route("/api/v1/projects/:name/raw/*filepath", get(get_raw_file_api))
+        .route("/api/v1/projects/:name/todo", get(get_project_todo).post(post_project_todo))
+        .route("/api/v1/projects/:name/todo/diff", get(get_project_todo_diff))
+        .route("/:owner/:repo/tree/:branch", get(get_project_md_github))
+        .route("/:owner/:repo/raw/:branch/*filepath", get(get_raw_file_github))
+        .route("/:owner/:repo/blob/:branch/*filepath", get(get_raw_file_github))
+        .route("/project/:name", get(get_project_md_legacy))
+        .route("/private/project/:name", get(get_private_project_md))
+        .route("/healthz", get(healthz))
+        // v3.0 Security routes
+        .route("/setup", get(handle_setup).post(handle_setup_post))
+        .route("/login", post(handle_login))
+        .route("/csrf-token", get(handle_csrf_token))
+        .route("/token/generate", post(handle_token_generate))
+        .route("/dispatch", post(handle_dispatch))
+        .route("/t/:token/:owner/:repo/tree/:branch", get(handle_ai_readonly_tree))
+        .route("/t/:token/:owner/:repo/tree/:branch/*rest", get(handle_ai_readonly_tree))
+        .with_state(state)
 }
