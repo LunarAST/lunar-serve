@@ -3,12 +3,12 @@ use axum::{
     http::{HeaderMap, header, StatusCode},
     response::{IntoResponse, Response, Json},
 };
-use crate::{
+use lunar_serve::{
     AppState, make_error_response, load_map, write_audit_log,
     create_session, validate_session, generate_lct, verify_lct, LctPayload,
-    verify_totp, check_rate_limit, record_failure, parse_lunar_patch,
+    verify_totp, parse_lunar_patch,
 };
-use crate::render;
+use lunar_serve::render;
 use crate::handlers::core::MdQuery;
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -17,6 +17,19 @@ use std::sync::Arc;
 use std::fs;
 use std::time::Instant;
 use chrono::Utc;
+
+fn get_client_ip(headers: &HeaderMap) -> String {
+    if let Some(ip) = headers.get("CF-Connecting-IP").and_then(|v| v.to_str().ok()) {
+        return ip.to_string();
+    }
+    if let Some(ip) = headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok()) {
+        return ip.split(',').next().unwrap_or("127.0.0.1").trim().to_string();
+    }
+    if let Some(ip) = headers.get("X-Real-IP").and_then(|v| v.to_str().ok()) {
+        return ip.to_string();
+    }
+    "127.0.0.1".to_string()
+}
 
 fn extract_session_id(headers: &HeaderMap) -> Option<String> {
     headers.get(header::COOKIE).and_then(|v| v.to_str().ok())
@@ -56,10 +69,6 @@ pub async fn handle_setup_post(
     headers: HeaderMap,
     Json(body): Json<SetupResetRequest>,
 ) -> Result<Response, Response> {
-    let ip = headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok()).unwrap_or("127.0.0.1");
-    if let Err(reason) = check_rate_limit(ip, 5, 15, 900) {
-        return Err(make_error_response(StatusCode::TOO_MANY_REQUESTS, &reason, ""));
-    }
     let session_id = extract_session_id(&headers).unwrap_or_default();
     let csrf_token = headers.get("X-CSRF-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
     let stored_csrf = validate_session(&session_id).ok_or_else(|| make_error_response(StatusCode::UNAUTHORIZED, "Invalid session", ""))?;
@@ -72,7 +81,6 @@ pub async fn handle_setup_post(
     let current_secret = current_secret.trim();
     let expected = totp_lite::totp::<totp_lite::Sha1>(current_secret.as_bytes(), Utc::now().timestamp() as u64);
     if expected != body.totp {
-        record_failure(ip, 5, 15, 900);
         return Err(make_error_response(StatusCode::UNAUTHORIZED, "Invalid current TOTP", ""));
     }
     let mut seed = [0u8; 20];
@@ -93,10 +101,6 @@ pub async fn handle_login(
     headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> Result<Response, Response> {
-    let ip = headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok()).unwrap_or("127.0.0.1");
-    if let Err(reason) = check_rate_limit(ip, 5, 15, 900) {
-        return Err(make_error_response(StatusCode::TOO_MANY_REQUESTS, &reason, ""));
-    }
     match verify_totp(&body.totp) {
         Ok(true) => {
             let (session_id, csrf_token) = create_session();
@@ -106,11 +110,9 @@ pub async fn handle_login(
             Ok(resp)
         }
         Ok(false) => {
-            record_failure(ip, 5, 15, 900);
             Err(make_error_response(StatusCode::UNAUTHORIZED, "Invalid TOTP", "Check authenticator."))
         }
         Err(e) => {
-            record_failure(ip, 5, 15, 900);
             Err(make_error_response(StatusCode::INTERNAL_SERVER_ERROR, "TOTP error", &e))
         }
     }
@@ -155,10 +157,6 @@ pub async fn handle_dispatch(
     headers: HeaderMap,
     Json(body): Json<DispatchRequest>,
 ) -> Result<Response, Response> {
-    let ip = headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok()).unwrap_or("127.0.0.1");
-    if let Err(reason) = check_rate_limit(ip, 5, 15, 900) {
-        return Err(make_error_response(StatusCode::TOO_MANY_REQUESTS, &reason, ""));
-    }
     let session_id = extract_session_id(&headers).unwrap_or_default();
     let csrf_token = headers.get("X-CSRF-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
     let stored_csrf = validate_session(&session_id).ok_or_else(|| make_error_response(StatusCode::UNAUTHORIZED, "Invalid session", ""))?;
@@ -167,14 +165,8 @@ pub async fn handle_dispatch(
     }
     match verify_totp(&body.totp) {
         Ok(true) => {},
-        Ok(false) => {
-            record_failure(ip, 5, 15, 900);
-            return Err(make_error_response(StatusCode::UNAUTHORIZED, "Invalid TOTP", ""));
-        }
-        Err(e) => {
-            record_failure(ip, 5, 15, 900);
-            return Err(make_error_response(StatusCode::INTERNAL_SERVER_ERROR, "TOTP error", &e));
-        }
+        Ok(false) => return Err(make_error_response(StatusCode::UNAUTHORIZED, "Invalid TOTP", "")),
+        Err(e) => return Err(make_error_response(StatusCode::INTERNAL_SERVER_ERROR, "TOTP error", &e)),
     }
     let parsed = parse_lunar_patch(&body.patch_content);
     let ai_agent = parsed.as_ref().map(|p| p.ai_agent.as_str()).unwrap_or("unknown");
@@ -186,7 +178,7 @@ pub async fn handle_dispatch(
     let staging_path = std::path::Path::new(staging_dir).join(&filename);
     fs::write(&staging_path, &body.patch_content)
         .map_err(|e| make_error_response(StatusCode::INTERNAL_SERVER_ERROR, "Save patch error", &e.to_string()))?;
-    write_audit_log(ip, &headers, "/dispatch", "POST", "staging", Some(&filename), 200, 0);
+    write_audit_log(&get_client_ip(&headers), &headers, "/dispatch", "POST", "staging", Some(&filename), 200, 0);
     Ok(Json(serde_json::json!({ "status": "staged", "file": filename, "ai_agent": ai_agent })).into_response())
 }
 

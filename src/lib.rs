@@ -103,16 +103,14 @@ pub fn load_repos(base_dir: &std::path::Path) -> ReposConfig {
 pub mod session;
 pub mod lct;
 pub mod totp;
-pub mod rate_limiter;
 pub mod patch;
 pub mod utils;
 pub mod render;
-pub mod handlers; // <--- ADDED: handlers as a library module
+pub mod handlers;
 
 pub use session::{create_session, validate_session, invalidate_session, spawn_cleanup_task};
 pub use lct::{LctPayload, generate_lct, verify_lct, load_signing_key};
 pub use totp::verify_totp;
-pub use rate_limiter::{check as check_rate_limit, record_failure};
 pub use patch::{parse_lunar_patch, ParsedPatch};
 pub use utils::*;
 

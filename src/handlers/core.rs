@@ -3,7 +3,7 @@ use axum::{
     http::HeaderMap,
     response::{IntoResponse, Response, Json, Html},
 };
-use crate::{AppState, make_error_response, load_map, write_audit_log};
+use crate::{AppState, make_error_response, load_map, write_audit_log, is_authorized};
 use crate::render;
 use serde::Deserialize;
 use std::fs;
@@ -95,8 +95,19 @@ pub async fn get_project_md_github(
         }
     };
     let meta = state.project_index.get_meta(&name);
+    
+    // [ADDED] Enforce private project visibility
+    let visibility = meta.map(|m| m.visibility.as_str()).unwrap_or("public");
+    if visibility == "private" && !is_authorized(&headers) {
+        return Err(make_error_response(
+            axum::http::StatusCode::UNAUTHORIZED,
+            "Private project",
+            "This project is private. Please login or provide a valid LCT token."
+        ));
+    }
+
     if q.style.as_deref() == Some("mermaid") { return Ok(render::render_mermaid(&map).into_response()); }
-    let resp = render::render_negotiated_tree(&headers, &map, &name, meta, false)
+    let resp = render::render_negotiated_tree(&headers, &map, &name, meta, visibility == "private")
         .map_err(|(status, err)| make_error_response(status, &err, ""));
     let sc = resp.as_ref().map(|r| r.status().as_u16()).unwrap_or(500);
     write_audit_log("127.0.0.1", &headers, &format!("/{}/{}/tree/{}", owner, repo, branch), "GET", &name, None, sc, start.elapsed().as_millis());

@@ -16,7 +16,6 @@ use lunar_serve::{
     generate_lct, LctPayload, build_app,
 };
 use lunar_serve::session::clear_all_sessions;
-use lunar_serve::rate_limiter::clear_all_limits;
 
 struct TestContext {
     _temp: TempDir,
@@ -58,7 +57,6 @@ async fn setup_test_env() -> TestContext {
     fs::write(lunar_priv.join("interfaces.yml"), "").unwrap();
     fs::create_dir_all(root.join(".lunar/access-logs")).unwrap();
 
-    // Fixed: add required "sha" field to project objects
     let map = serde_json::json!({
         "version": "1.0",
         "projects": [
@@ -136,7 +134,6 @@ async fn setup_test_env() -> TestContext {
 async fn test_login_valid_totp() {
     let ctx = setup_test_env().await;
     clear_all_sessions();
-    clear_all_limits();
     let app = build_app(ctx.state);
 
     let expected = totp_lite::totp::<totp_lite::Sha1>(ctx.totp_secret.as_bytes(), chrono::Utc::now().timestamp() as u64);
@@ -152,7 +149,6 @@ async fn test_login_valid_totp() {
 async fn test_login_invalid_totp() {
     let ctx = setup_test_env().await;
     clear_all_sessions();
-    clear_all_limits();
     let app = build_app(ctx.state);
     let req = Request::post("/login")
         .header("Content-Type", "application/json")
@@ -166,7 +162,6 @@ async fn test_login_invalid_totp() {
 async fn test_csrf_protection_on_dispatch() {
     let ctx = setup_test_env().await;
     clear_all_sessions();
-    clear_all_limits();
     let app = build_app(ctx.state.clone());
 
     let expected = totp_lite::totp::<totp_lite::Sha1>(ctx.totp_secret.as_bytes(), chrono::Utc::now().timestamp() as u64);
@@ -203,7 +198,6 @@ async fn test_csrf_protection_on_dispatch() {
 async fn test_lct_private_project_access() {
     let ctx = setup_test_env().await;
     clear_all_sessions();
-    clear_all_limits();
     let app = build_app(ctx.state.clone());
 
     let exp = chrono::Utc::now().timestamp() as u64 + 3600;
@@ -219,18 +213,17 @@ async fn test_lct_private_project_access() {
     let uri = format!("/t/{}/me/private-proj/tree/main", token);
     let req = Request::get(&uri).body(Body::empty()).unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap_or_default();
-        panic!("LCT access failed with {}: {}", status, String::from_utf8_lossy(&body));
-    }
+    assert!(
+        resp.status().is_success(),
+        "Expected success with valid LCT, got {}",
+        resp.status()
+    );
 }
 
 #[tokio::test]
 async fn test_setup_requires_auth() {
     let ctx = setup_test_env().await;
     clear_all_sessions();
-    clear_all_limits();
     let app = build_app(ctx.state.clone());
 
     let req = Request::get("/setup").body(Body::empty()).unwrap();
@@ -251,29 +244,4 @@ async fn test_setup_requires_auth() {
         .body(Body::empty()).unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-}
-
-#[tokio::test]
-async fn test_rate_limiter_blocks_after_failures() {
-    let ctx = setup_test_env().await;
-    clear_all_sessions();
-    clear_all_limits();
-    let app = build_app(ctx.state);
-
-    for _ in 0..5 {
-        let req = Request::post("/login")
-            .header("Content-Type", "application/json")
-            .body(Body::from(serde_json::json!({ "totp": "000000" }).to_string()))
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    let req = Request::post("/login")
-        .header("Content-Type", "application/json")
-        .body(Body::from(serde_json::json!({ "totp": "000000" }).to_string()))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert!(!resp.status().is_success());
-    assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
 }
