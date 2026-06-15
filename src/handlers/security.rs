@@ -92,13 +92,13 @@ pub async fn handle_setup_post(
     Ok(Json(serde_json::json!({ "message": "TOTP secret rotated", "otpauth_uri": uri })).into_response())
 }
 
-// ---- /login ----
+// ---- /login (headers unused, but kept for consistency) ----
 #[derive(Deserialize)]
 pub struct LoginRequest { pub totp: String }
 
 pub async fn handle_login(
     State(_state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> Result<Response, Response> {
     match verify_totp(&body.totp) {

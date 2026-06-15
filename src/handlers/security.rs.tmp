@@ -1,0 +1,2 @@
+# 替换 handle_login 参数 headers 为 _headers，并删除重复定义
+sed -i 's/headers: HeaderMap,/_headers: HeaderMap,/g' lunar-serve/src/handlers/security.rs
