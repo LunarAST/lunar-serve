@@ -146,7 +146,6 @@ pub async fn handle_token_generate(
     let branch = if let Some(meta) = state.project_index.get_meta(&body.repo) {
         if let Some(ref github) = meta.github {
             if github.branch != body.branch {
-                    eprintln!("[LCT DEBUG] corrected branch to: {} (from repos.json)", github.branch);
                 github.branch.clone()
             } else {
                 body.branch.clone()
