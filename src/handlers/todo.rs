@@ -29,19 +29,35 @@ pub async fn get_project_todo(
         None => return Err(make_error_response(axum::http::StatusCode::BAD_REQUEST, "Path missing", "")),
     };
     let todo_path = std::path::Path::new(&base_path).join(".lunar/ai-todo.json");
-    if !todo_path.exists() {
-        let empty = serde_json::json!({ "project": name, "status": "idle", "lastHandover": Utc::now().to_rfc3339(), "tasks": [] });
-        write_audit_log("127.0.0.1", &headers, &format!("/api/v1/projects/{}/todo", name), "GET", &name, Some(".lunar/ai-todo.json"), 200, start.elapsed().as_millis());
-        return Ok(Json(empty).into_response());
-    }
-    match fs::read_to_string(&todo_path) {
-        Ok(content) => {
-            let val: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
-            write_audit_log("127.0.0.1", &headers, &format!("/api/v1/projects/{}/todo", name), "GET", &name, Some(".lunar/ai-todo.json"), 200, start.elapsed().as_millis());
-            Ok(Json(val).into_response())
+    
+    // Prepare the base response value
+    let mut response = if !todo_path.exists() {
+        serde_json::json!({ "project": name, "status": "idle", "lastHandover": Utc::now().to_rfc3339(), "tasks": [] })
+    } else {
+        match fs::read_to_string(&todo_path) {
+            Ok(content) => {
+                serde_json::from_str(&content).unwrap_or(serde_json::json!({ "project": name, "tasks": [] }))
+            }
+            Err(e) => return Err(make_error_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Failed to read todo", &e.to_string())),
         }
-        Err(e) => Err(make_error_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Failed to read todo", &e.to_string())),
-    }
+    };
+
+    // Inject write instructions for AI agents on demand
+    response["writeInstructions"] = serde_json::json!({
+        "contract_patch": {
+            "description": "To propose a contract patch, reply with a LUNAR_PATCH formatted block containing valid YAML.",
+            "format": {
+                "type": "contract_patch",
+                "required_fields": ["exposed"],
+                "exposed": [{"method": "GET|POST|PUT|DELETE", "path": "/api/v1/..."}],
+                "consumed": [{"method": "GET|POST|PUT|DELETE", "path": "/api/v1/...", "targetProject": "service-name"}]
+            },
+            "example": "---LUNAR_PATCH_START---\ntype: contract_patch\nai_agent: <name>\nsession_context: <reason>\ntimestamp: <ISO8601>\n---CONTENT---\nexposed:\n  - method: GET\n    path: /api/v1/resource\n---LUNAR_PATCH_END---"
+        }
+    });
+
+    write_audit_log("127.0.0.1", &headers, &format!("/api/v1/projects/{}/todo", name), "GET", &name, Some(".lunar/ai-todo.json"), 200, start.elapsed().as_millis());
+    Ok(Json(response).into_response())
 }
 
 pub async fn post_project_todo(

@@ -142,20 +142,11 @@ pub async fn handle_token_generate(
     }
     let exp = Utc::now().timestamp() as u64 + (body.duration_minutes * 60);
     
-    // Automatically correct branch if project config holds a real branch, otherwise keep the frontend value
     let branch = if let Some(meta) = state.project_index.get_meta(&body.repo) {
         if let Some(ref github) = meta.github {
-            if github.branch != body.branch {
-                github.branch.clone()
-            } else {
-                body.branch.clone()
-            }
-        } else {
-            body.branch.clone()
-        }
-    } else {
-        body.branch.clone()
-    };
+            if github.branch != body.branch { github.branch.clone() } else { body.branch.clone() }
+        } else { body.branch.clone() }
+    } else { body.branch.clone() };
     
     let payload = LctPayload { exp, owner: body.owner.clone(), repo: body.repo.clone(), branch, scope: "readonly".into() };
     let token = generate_lct(&payload, &state.signing_key)
@@ -184,9 +175,23 @@ pub async fn handle_dispatch(
         Ok(false) => return Err(make_error_response(StatusCode::UNAUTHORIZED, "Invalid TOTP", "")),
         Err(e) => return Err(make_error_response(StatusCode::INTERNAL_SERVER_ERROR, "TOTP error", &e)),
     }
+    
     let parsed = parse_lunar_patch(&body.patch_content);
     let ai_agent = parsed.as_ref().map(|p| p.ai_agent.as_str()).unwrap_or("unknown");
     let patch_type = parsed.as_ref().map(|p| p.patch_type.as_str()).unwrap_or("unknown");
+    
+    // 预校验：contract_patch 必须符合接口契约结构
+    if patch_type == "contract_patch" {
+        let content = parsed.as_ref().map(|p| p.content.as_str()).unwrap_or("");
+        if let Err(e) = serde_yaml::from_str::<lunar_interface::InterfacesYml>(content) {
+            return Err(make_error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                &format!("Invalid contract patch: {}", e),
+                "Patch must contain 'exposed' and optionally 'consumed' arrays with 'method' and 'path' fields."
+            ));
+        }
+    }
+    
     let staging_dir = ".lunar/suggestions";
     let _ = fs::create_dir_all(staging_dir);
     let timestamp = Utc::now().format("%Y%m%dT%H%M%SZ");
