@@ -15,6 +15,13 @@ async fn main() {
     purge_old_logs();
     spawn_cleanup_task();
 
+    // 写入 PID 文件
+    let pid = std::process::id();
+    if let Some(parent) = std::path::Path::new(".lunar").parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    fs::write(".lunar/lunar-serve.pid", pid.to_string()).unwrap();
+
     let port: u16 = std::env::var("LUNAR_SERVE_PORT").unwrap_or_else(|_| "8787".to_string()).parse().unwrap_or(8787);
     let args: Vec<String> = std::env::args().collect();
     let data_path = if args.len() > 1 { PathBuf::from(&args[1]) } else { PathBuf::from("lunar-map.json") };

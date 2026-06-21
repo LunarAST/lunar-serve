@@ -99,31 +99,24 @@ pub fn render_project_md(
     // ------------------------------------------------------------------------
     // AI Instruction Loading — Config-Driven, Project-Agnostic
     // ------------------------------------------------------------------------
-    // The instruction is loaded from lunar-serve's own config directory.
-    // This is the SINGLE source of truth for all projects.
+    // The instruction is loaded from `config/ai-instruction.md` relative to the
+    // current working directory of the server process.
     // No project-local overrides. No hardcoded fallback.
     // ------------------------------------------------------------------------
-    let config_dir = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|p| p.to_path_buf()))
-        .map(|mut p| { p.push(".."); p.push("config"); p });
-    if let Some(dir) = config_dir {
-        let instruction_path = dir.join("ai-instruction.md");
-        if instruction_path.exists() {
-            if let Ok(inst_content) = fs::read_to_string(&instruction_path) {
-                let rendered = inst_content
-                    .replace("{project_name}", name)
-                    .replace("{base_url}", &request_host)
-                    .replace("{branch}", git_branch)
-                    .replace("{owner}", git_owner)
-                    .replace("{repo}", git_repo);
-                md.push_str(&rendered);
-                md.push_str("\n\n---\n\n");
-            }
+    let instruction_path = std::path::Path::new("lunar-serve/config/ai-instruction.md");
+    if instruction_path.exists() {
+        if let Ok(inst_content) = fs::read_to_string(instruction_path) {
+            let rendered = inst_content
+                .replace("{project_name}", name)
+                .replace("{base_url}", &request_host)
+                .replace("{branch}", git_branch)
+                .replace("{owner}", git_owner)
+                .replace("{repo}", git_repo);
+            md.push_str(&rendered);
+            md.push_str("\n\n---\n\n");
         }
     }
     // If config/ai-instruction.md does not exist, render nothing.
-    // This is intentional — no hardcoded fallback.
     // ------------------------------------------------------------------------
 
     md.push_str(&format!("# Project: {}\n\n- Type: {}\n- Scan Status: {}\n- Exposed: {}\n- Consumed: {}\n\n", p.name, p.project_type, p.scan_status, exp, con));
