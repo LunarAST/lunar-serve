@@ -92,7 +92,7 @@ pub async fn handle_setup_post(
     Ok(Json(serde_json::json!({ "message": "TOTP secret rotated", "otpauth_uri": uri })).into_response())
 }
 
-// ---- /login (headers unused, but kept for consistency) ----
+// ---- /login ----
 #[derive(Deserialize)]
 pub struct LoginRequest { pub totp: String }
 
@@ -141,11 +141,27 @@ pub async fn handle_token_generate(
         return Err(make_error_response(StatusCode::FORBIDDEN, "CSRF token mismatch", ""));
     }
     let exp = Utc::now().timestamp() as u64 + (body.duration_minutes * 60);
-    let payload = LctPayload { exp, owner: body.owner.clone(), repo: body.repo.clone(), branch: body.branch.clone(), scope: "readonly".into() };
+    
+    // Automatically correct branch if project config holds a real branch, otherwise keep the frontend value
+    let branch = if let Some(meta) = state.project_index.get_meta(&body.repo) {
+        if let Some(ref github) = meta.github {
+            if github.branch != body.branch {
+                github.branch.clone()
+            } else {
+                body.branch.clone()
+            }
+        } else {
+            body.branch.clone()
+        }
+    } else {
+        body.branch.clone()
+    };
+    
+    let payload = LctPayload { exp, owner: body.owner.clone(), repo: body.repo.clone(), branch, scope: "readonly".into() };
     let token = generate_lct(&payload, &state.signing_key)
         .map_err(|e| make_error_response(StatusCode::INTERNAL_SERVER_ERROR, "Token generation error", &e))?;
     let base_url = std::env::var("LUNAR_SERVE_DOMAIN").unwrap_or_else(|_| "http://localhost:8787".into());
-    let url = format!("{}/t/{}/{}/{}/tree/{}", base_url.trim_end_matches('/'), token, body.owner, body.repo, body.branch);
+    let url = format!("{}/t/{}/{}/{}/tree/{}", base_url.trim_end_matches('/'), token, body.owner, body.repo, payload.branch);
     Ok(Json(serde_json::json!({ "token": token, "url": url, "expires_at": exp })).into_response())
 }
 

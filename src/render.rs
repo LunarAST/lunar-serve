@@ -96,23 +96,35 @@ pub fn render_project_md(
 
     let mut md = String::new();
 
-    // Read AI Agent System Instruction from local workspace path if available on VPS disk
-    if let Some(ref path) = base_path {
-        let instruction_path = std::path::Path::new(path).join(".lunar/ai-instruction.md");
+    // ------------------------------------------------------------------------
+    // AI Instruction Loading — Config-Driven, Project-Agnostic
+    // ------------------------------------------------------------------------
+    // The instruction is loaded from lunar-serve's own config directory.
+    // This is the SINGLE source of truth for all projects.
+    // No project-local overrides. No hardcoded fallback.
+    // ------------------------------------------------------------------------
+    let config_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.to_path_buf()))
+        .map(|mut p| { p.push(".."); p.push("config"); p });
+    if let Some(dir) = config_dir {
+        let instruction_path = dir.join("ai-instruction.md");
         if instruction_path.exists() {
             if let Ok(inst_content) = fs::read_to_string(&instruction_path) {
-                md.push_str(&inst_content);
+                let rendered = inst_content
+                    .replace("{project_name}", name)
+                    .replace("{base_url}", &request_host)
+                    .replace("{branch}", git_branch)
+                    .replace("{owner}", git_owner)
+                    .replace("{repo}", git_repo);
+                md.push_str(&rendered);
                 md.push_str("\n\n---\n\n");
             }
-        } else {
-            md.push_str("> 🤖 **AI Agent Instruction (LunarAST Decoupled Protocol)**\n");
-            md.push_str(&format!("> You are currently analyzing the codebase of `{}` (from the `CommonIntents` protocol family).\n", name));
-            md.push_str("> 1. To explore the directory layout, inspect the **Workspace File Tree** at the bottom of this page.\n");
-            md.push_str(&format!("> 2. To read any file contents, do NOT guess. Fetch it dynamically on-demand via:\n>    `https://{}/{}/{}/raw/{}/<filepath>`\n", request_host, git_owner, git_repo, git_branch));
-            md.push_str(&format!("> 3. Read or update active tasks on the Handover TODO board via:\n>    `https://{}/api/v1/projects/{}/todo`\n", request_host, name.to_lowercase()));
-            md.push_str("\n\n---\n\n");
         }
     }
+    // If config/ai-instruction.md does not exist, render nothing.
+    // This is intentional — no hardcoded fallback.
+    // ------------------------------------------------------------------------
 
     md.push_str(&format!("# Project: {}\n\n- Type: {}\n- Scan Status: {}\n- Exposed: {}\n- Consumed: {}\n\n", p.name, p.project_type, p.scan_status, exp, con));
     if let Some(interfaces) = p.interfaces.as_object() {
