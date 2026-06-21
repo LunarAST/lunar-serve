@@ -15,9 +15,14 @@ lunar-serve/
 ├── Cargo.toml
 └── src/
     ├── lib.rs            # Project registry deserialization & case-insensitive matching
-    ├── main.rs           # Minimalist entrypoint and controller handlers (<150 lines)
-    ├── render.rs         # Markdown, Mermaid, and collapsible directory tree renderer
-    └── utils.rs          # Safe file IO, JSONL rolling writer, and daily log purger
+    ├── main.rs           # Minimalist entrypoint and controller handlers
+    ├── render.rs         # Markdown, Mermaid, collapsible directory tree, AI instruction loader
+    ├── utils.rs          # Safe file IO, JSONL rolling writer, daily log purger
+    ├── session.rs        # In-memory session manager with CSRF binding
+    ├── lct.rs            # Ed25519-signed LunarAST Cryptographic Token
+    ├── totp.rs           # TOTP validation (HMAC-SHA1, 6 digits, ±30s tolerance)
+    ├── patch.rs          # AI patch parser (---LUNAR_PATCH_START--- format)
+    └── handlers/         # Route handler modules (core, raw, todo, security)
 ```
 
 ---
@@ -31,7 +36,8 @@ In any terminal path, simply run:
 ```bash
 lunar
 ```
-And select `[5] Launch serving daemon` from the menu.
+And select `[5] Launch serving daemon` from the menu.  
+The CLI also allows stopping (`8`) and restarting (`9`) the daemon via PID file.
 
 ### Option 2: Run directly from binary
 ```bash
@@ -39,7 +45,7 @@ lunar-serve /opt/lunar-map.json
 ```
 *   **Default Port**: Listens on `http://0.0.0.0:8787`.
 *   **Port Override**: Export `LUNAR_SERVE_PORT=8080` to override.
-*   **Host Domain Mapping**: Export `LUNAR_SERVE_DOMAIN="https://lunar.aifify.com"` to declare your primary public domain. The server will dynamically fall back to HTTP Host header sniffing if this is omitted.
+*   **Host Domain Mapping**: Export `LUNAR_SERVE_DOMAIN="https://lunar.aifify.com"` to declare your primary public domain. The server dynamically falls back to HTTP Host header sniffing if this is omitted.
 
 ---
 
@@ -48,7 +54,7 @@ lunar-serve /opt/lunar-map.json
 `lunar-serve` is designed as a secure, stateless, read-only code interface for AI Agentic consumption.
 
 ### 1. Canvas Index (GET `/`)
-Serves the single-file compiled React canvas of `lunar-scope` natively. Opening `http://127.0.0.1:8787/` in your browser instantly loads the 3D topology chart, with zero CORS friction and zero Nginx static hosting configurations required.
+Serves the single-file compiled React canvas of `lunar-scope` natively. Opening `http://127.0.0.1:8787/` in your browser instantly loads the topology chart, with zero CORS friction and zero Nginx static hosting configurations required.
 
 ### 2. File Tree & Contract Summary (Accept-based Multimodal Response)
 *   **Endpoint**: `GET /:owner/:repo/tree/:branch`
@@ -64,6 +70,30 @@ Serves the single-file compiled React canvas of `lunar-scope` natively. Opening 
 *   **GET `/api/v1/projects/:name/todo`**: Retrieves the current AI task list and pending contract patches.
 *   **POST `/api/v1/projects/:name/todo`**: Updates tasks and registers cryptographic handovers.
 *   **GET `/api/v1/projects/:name/todo/diff`**: Returns a side-by-side comparative Markdown diff of the pending patch against your current contract for peer-review AI models.
+
+---
+
+## 🔐 v3.0 Security Layer & Global AI Instruction
+
+### Human Login & Session
+*   **POST `/login`** – Accepts a 6‑digit TOTP code. On success, issues an `HttpOnly; Secure; SameSite=Strict` session cookie and returns a CSRF token.
+*   **GET `/csrf-token`** – Returns the CSRF token for the current session.
+
+### LCT Token Generation (AI Read-Only Access)
+*   **POST `/token/generate`** – Requires session + CSRF. Generates a time‑limited, resource‑bound LCT (Ed25519‑signed). The token is automatically corrected to use the real branch from `repos.json`.
+*   **GET `/t/:token/:owner/:repo/tree/:branch`** – Validates the LCT token. If valid, serves the project page exactly like the public route, but without requiring a login session.
+
+### Patch Dispatch (Human‑only, Two‑Factor)
+*   **POST `/dispatch`** – Requires session, CSRF, and a valid TOTP code. Writes the submitted AI patch into `.lunar/suggestions/` for later CLI merging.
+
+### Project Visibility Enforcement
+Projects marked `"visibility": "private"` in `repos.json` will return `401 Unauthorized` unless accessed with a valid session cookie or LCT token. Public projects remain openly readable.
+
+### Global AI Instruction
+Place a `config/ai‑instruction.md` file inside the `lunar‑serve` directory. It is loaded at startup and rendered at the top of every project page. No project‑specific overrides – one source of truth for all repositories. A default template is included in the repository.
+
+### Server PID File
+On startup, `lunar‑serve` writes its process ID to `.lunar/lunar‑serve.pid`. This is used by the `lunar` CLI to stop/restart the server gracefully.
 
 ---
 
