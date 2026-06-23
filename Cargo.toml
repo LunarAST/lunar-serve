@@ -1,6 +1,6 @@
 [package]
 name = "lunar-serve"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Read-only HTTP distribution layer for LunarAST ecosystem data"
 
