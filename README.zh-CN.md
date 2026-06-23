@@ -1,5 +1,5 @@
 # lunar-serve
-**LunarAST 生态高解耦、零警告、只读式 HTTP 数据分发层**
+**LunarAST 生态高解耦、无警告、只读式 HTTP 数据分发层**
 
 `lunar-serve` 是基于 Axum 构建的轻量零依赖 HTTP 服务。读取全局拓扑文件 `lunar-map.json`，无需人工配置，即可向AI智能体提供可读性 Markdown 接口契约、结构化 JSON 数据，以及**按需源码镜像直读**能力。
 
@@ -27,21 +27,43 @@ lunar-serve/
 ## ⚡ 快速部署
 部署前需先用 `lunar` 命令行工具生成全局拓扑映射文件。
 
-### 方案1：通过 lunar 命令一键启动（推荐）
-任意目录执行：
+### 安装方式
+#### 方案A：下载预编译二进制包（推荐，速度最快）
+GitHub Releases 发布页提供 **Linux amd64** 架构预编译程序：
+1. 从最新版本下载 `lunar-serve` 主程序与校验文件 `checksums.txt`
+2. （推荐）校验程序文件完整性：
+```bash
+sha256sum -c checksums.txt
+```
+3. 赋予执行权限并移动至系统环境变量目录：
+```bash
+chmod +x lunar-serve
+sudo mv lunar-serve /usr/local/bin/
+```
+
+> 备注：当前仅提供 Linux amd64 二进制包，macOS、Windows、ARM 架构请使用下方源码编译方案。
+
+#### 方案B：本地源码编译
+```bash
+cargo build --release -p lunar-serve
+# 编译产物存放路径：target/release/lunar-serve
+```
+
+### 启动方式一：通过 lunar 命令一键启动（推荐）
+任意终端目录直接执行：
 ```bash
 lunar
 ```
 在交互菜单选择 `[5] 启动分发服务`。
 命令行同时支持通过 PID 文件执行停止（选项8）、重启（选项9）操作。
 
-### 方案2：直接运行二进制程序
+### 启动方式二：直接运行二进制程序
 ```bash
 lunar-serve /opt/lunar-map.json
 ```
 *   **默认监听端口**：`http://0.0.0.0:8787`
 *   **自定义端口**：配置环境变量 `LUNAR_SERVE_PORT=8080` 覆盖默认端口
-*   **公网域名配置**：配置环境变量 `LUNAR_SERVE_DOMAIN="shturl.cc/fJhSfQqTkISdmsZXzS1"` 指定对外域名；未配置时服务会自动通过 HTTP Host 请求头自适应域名
+*   **公网域名配置**：配置环境变量 `LUNAR_SERVE_DOMAIN="shturl.cc/BGtfDfzzM8H9V"` 指定对外域名；未配置时服务会自动通过 HTTP Host 请求头自适应域名
 
 ---
 

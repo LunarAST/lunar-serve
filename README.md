@@ -31,6 +31,30 @@ lunar-serve/
 
 Ensure you have generated the global topography map using the `lunar` CLI first.
 
+### Installation
+
+#### Option A: Download a pre-built binary (fastest)
+Pre-built binaries are available for **Linux amd64** on the [GitHub Releases](https://github.com/LunarAST/lunar-serve/releases) page.
+
+1. Download `lunar-serve` and the accompanying `checksums.txt` from the latest release.
+2. (Recommended) Verify integrity:
+   ```bash
+   sha256sum -c checksums.txt
+   ```
+3. Make the binary executable and move it to a directory in your `PATH`:
+   ```bash
+   chmod +x lunar-serve
+   sudo mv lunar-serve /usr/local/bin/
+   ```
+
+> **Note**: Currently only Linux amd64 is provided. For other platforms, compile from source (see below).
+
+#### Option B: Compile from source
+```bash
+cargo build --release -p lunar-serve
+# The binary will be located at target/release/lunar-serve
+```
+
 ### Option 1: One-Click Launch via lunar CLI (Recommended)
 In any terminal path, simply run:
 ```bash
@@ -45,7 +69,7 @@ lunar-serve /opt/lunar-map.json
 ```
 *   **Default Port**: Listens on `http://0.0.0.0:8787`.
 *   **Port Override**: Export `LUNAR_SERVE_PORT=8080` to override.
-*   **Host Domain Mapping**: Export `LUNAR_SERVE_DOMAIN="https://lunar.aifify.com"` to declare your primary public domain. The server dynamically falls back to HTTP Host header sniffing if this is omitted.
+*   **Host Domain Mapping**: Export `LUNAR_SERVE_DOMAIN="https://your-domain.com"` to declare your primary public domain. The server dynamically falls back to HTTP Host header sniffing if this is omitted.
 
 ---
 
