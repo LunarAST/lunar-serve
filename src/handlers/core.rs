@@ -3,7 +3,7 @@ use axum::{
     http::HeaderMap,
     response::{IntoResponse, Response, Json, Html},
 };
-use crate::{AppState, make_error_response, load_map, write_audit_log, is_authorized};
+use crate::{AppState, make_error_response, load_map, write_audit_log};
 use crate::render;
 use serde::Deserialize;
 use std::fs;
@@ -19,6 +19,14 @@ pub struct MdQuery {
     pub status: Option<String>,
     pub path: Option<String>,
     pub style: Option<String>,
+    // New structured query params
+    #[serde(default)]
+    pub q: Option<String>,      // search term for path/method
+    pub method: Option<String>, // filter by HTTP method
+    #[serde(rename = "type")]
+    pub filter_type: Option<String>, // "exposed" or "consumed"
+    #[serde(default)]
+    pub format: Option<String>, // "json" to force JSON response
 }
 
 pub async fn get_index(State(state): State<Arc<AppState>>) -> Result<Html<String>, Response> {
@@ -34,11 +42,34 @@ pub async fn get_index(State(state): State<Arc<AppState>>) -> Result<Html<String
     fs::read_to_string(path).map(Html).map_err(|e| make_error_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Read index.html error", &e.to_string()))
 }
 
-pub async fn get_json(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, Response> {
+pub async fn get_json(State(state): State<Arc<AppState>>, Query(q): Query<MdQuery>) -> Result<Json<serde_json::Value>, Response> {
     let start = Instant::now();
     let map = load_map(&state.data_path).map_err(|(s,e)| make_error_response(s, &e, ""))?;
     write_audit_log("127.0.0.1", &HeaderMap::new(), "/lunar-map.json", "GET", "global", None, 200, start.elapsed().as_millis());
-    serde_json::to_value(&map).map_err(|e| make_error_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Serialization error", &e.to_string())).map(Json)
+    
+    if q.summary {
+        let projects: Vec<serde_json::Value> = map.projects.iter().map(|p| {
+            let exp_count = p.interfaces.get("exposed").and_then(|e| e.as_array()).map_or(0, |a| a.len());
+            let con_count = p.interfaces.get("consumed").and_then(|c| c.as_array()).map_or(0, |a| a.len());
+            serde_json::json!({
+                "name": p.name,
+                "type": p.project_type,
+                "exposed_count": exp_count,
+                "consumed_count": con_count,
+                "scan_status": p.scan_status,
+                "path": p.path,
+            })
+        }).collect();
+        let summary = serde_json::json!({
+            "projects": projects,
+            "total_projects": map.projects.len(),
+        });
+        return Ok(Json(summary));
+    }
+    
+    serde_json::to_value(&map)
+        .map_err(|e| make_error_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Serialization error", &e.to_string()))
+        .map(Json)
 }
 
 pub async fn get_markdown(State(state): State<Arc<AppState>>, Query(q): Query<MdQuery>) -> Result<String, Response> {
@@ -63,7 +94,90 @@ pub async fn get_project_md_api(
     let name = name.trim_end_matches(".md").trim_end_matches(".json");
     let map = load_map(&state.data_path).map_err(|(s,e)| make_error_response(s, &e, ""))?;
     let meta = state.project_index.get_meta(&name);
+
+    // Determine if JSON response is desired
+    let want_json = q.format.as_deref() == Some("json") || headers.get("Accept").and_then(|v| v.to_str().ok()).map_or(false, |a| a.contains("application/json"));
+
     if q.style.as_deref() == Some("mermaid") { return Ok(render::render_mermaid(&map).into_response()); }
+
+    // If structured query requested, produce filtered JSON
+    if want_json && (q.q.is_some() || q.method.is_some() || q.filter_type.is_some()) {
+        let project = map.projects.iter().find(|p| p.name.eq_ignore_ascii_case(&name));
+        if project.is_none() {
+            return Ok(Json(serde_json::json!({"error": "Project not found"})).into_response());
+        }
+        let p = project.unwrap();
+        let exposed = p.interfaces.get("exposed").and_then(|e| e.as_array());
+        let consumed = p.interfaces.get("consumed").and_then(|e| e.as_array());
+        let mut results = Vec::new();
+
+        let filter_method = q.method.as_deref().map(|m| m.to_uppercase());
+        let search_term = q.q.as_deref().map(|s| s.to_lowercase());
+
+        // Helper to check a single interface entry
+        let matches = |item: &serde_json::Value, default_status: &str| -> bool {
+            let method = item.get("method").and_then(|m| m.as_str()).unwrap_or("");
+            let path = item.get("path").and_then(|p| p.as_str()).unwrap_or("");
+            let status = item.get("status").and_then(|v| v.as_str()).unwrap_or(default_status);
+            if let Some(ref ft) = filter_method {
+                if method.to_uppercase() != *ft { return false; }
+            }
+            if let Some(ref q) = search_term {
+                if !method.to_lowercase().contains(q) && !path.to_lowercase().contains(q) && !status.to_lowercase().contains(q) {
+                    return false;
+                }
+            }
+            true
+        };
+
+        // Exposed
+        if q.filter_type.as_deref() != Some("consumed") {
+            if let Some(exp) = exposed {
+                for item in exp {
+                    if matches(item, "aligned") {
+                        results.push(serde_json::json!({
+                            "type": "exposed",
+                            "method": item["method"],
+                            "path": item["path"],
+                            "status": item.get("status").and_then(|v| v.as_str()).unwrap_or("aligned")
+                        }));
+                    }
+                }
+            }
+        }
+        // Consumed
+        if q.filter_type.as_deref() != Some("exposed") {
+            if let Some(con) = consumed {
+                for item in con {
+                    if matches(item, "aligned") {
+                        results.push(serde_json::json!({
+                            "type": "consumed",
+                            "method": item["method"],
+                            "path": item["path"],
+                            "target_project": item.get("targetProject"),
+                            "status": item.get("status").and_then(|v| v.as_str()).unwrap_or("aligned")
+                        }));
+                    }
+                }
+            }
+        }
+
+        let response = serde_json::json!({
+            "project": name,
+            "query": {
+                "method": q.method,
+                "q": q.q,
+                "type": q.filter_type,
+            },
+            "count": results.len(),
+            "results": results
+        });
+        let sc = 200;
+        write_audit_log("127.0.0.1", &headers, &format!("/api/v1/projects/{}/map", name), "GET", &name, None, sc, start.elapsed().as_millis());
+        return Ok(Json(response).into_response());
+    }
+
+    // Default behavior: Markdown or JSON without filters
     let resp = render::render_negotiated_tree(&headers, &map, &name, meta, false)
         .map_err(|(status, err)| make_error_response(status, &err, ""));
     let sc = resp.as_ref().map(|r| r.status().as_u16()).unwrap_or(500);
@@ -71,6 +185,7 @@ pub async fn get_project_md_api(
     resp
 }
 
+// Remainder of the file unchanged (get_project_md_github, get_project_md_legacy, etc.)
 pub async fn get_project_md_github(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -95,17 +210,14 @@ pub async fn get_project_md_github(
         }
     };
     let meta = state.project_index.get_meta(&name);
-    
-    // [ADDED] Enforce private project visibility
     let visibility = meta.map(|m| m.visibility.as_str()).unwrap_or("public");
-    if visibility == "private" && !is_authorized(&headers) {
+    if visibility == "private" && !crate::utils::is_authorized(&headers) {
         return Err(make_error_response(
             axum::http::StatusCode::UNAUTHORIZED,
             "Private project",
             "This project is private. Please login or provide a valid LCT token."
         ));
     }
-
     if q.style.as_deref() == Some("mermaid") { return Ok(render::render_mermaid(&map).into_response()); }
     let resp = render::render_negotiated_tree(&headers, &map, &name, meta, visibility == "private")
         .map_err(|(status, err)| make_error_response(status, &err, ""));
