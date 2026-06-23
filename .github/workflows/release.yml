@@ -1,0 +1,7 @@
+      - name: Generate SHA256 checksums
+        run: |
+          sha256sum target/release/lunar > checksums.txt
+      - name: Upload checksums to release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: checksums.txt
