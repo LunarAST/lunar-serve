@@ -3,7 +3,7 @@ use axum::{
     http::HeaderMap,
     response::{IntoResponse, Response, Json, Html},
 };
-use crate::{AppState, make_error_response, load_map, write_audit_log};
+use crate::{AppState, make_error_response, load_map, write_audit_log, is_authorized};
 use crate::render;
 use serde::Deserialize;
 use std::fs;
@@ -42,11 +42,11 @@ pub async fn get_index(State(state): State<Arc<AppState>>) -> Result<Html<String
     fs::read_to_string(path).map(Html).map_err(|e| make_error_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Read index.html error", &e.to_string()))
 }
 
-pub async fn get_json(State(state): State<Arc<AppState>>, Query(q): Query<MdQuery>) -> Result<Json<serde_json::Value>, Response> {
+pub async fn get_json(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<MdQuery>) -> Result<Json<serde_json::Value>, Response> {
     let start = Instant::now();
     let map = load_map(&state.data_path).map_err(|(s,e)| make_error_response(s, &e, ""))?;
-    write_audit_log("127.0.0.1", &HeaderMap::new(), "/lunar-map.json", "GET", "global", None, 200, start.elapsed().as_millis());
-    
+    write_audit_log("127.0.0.1", &headers, "/lunar-map.json", "GET", "global", None, 200, start.elapsed().as_millis());
+
     if q.summary {
         let projects: Vec<serde_json::Value> = map.projects.iter().map(|p| {
             let exp_count = p.interfaces.get("exposed").and_then(|e| e.as_array()).map_or(0, |a| a.len());
@@ -66,7 +66,7 @@ pub async fn get_json(State(state): State<Arc<AppState>>, Query(q): Query<MdQuer
         });
         return Ok(Json(summary));
     }
-    
+
     serde_json::to_value(&map)
         .map_err(|e| make_error_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Serialization error", &e.to_string()))
         .map(Json)
@@ -94,6 +94,18 @@ pub async fn get_project_md_api(
     let name = name.trim_end_matches(".md").trim_end_matches(".json");
     let map = load_map(&state.data_path).map_err(|(s,e)| make_error_response(s, &e, ""))?;
     let meta = state.project_index.get_meta(&name);
+
+    // Authentication check for private projects
+    let visibility = meta.map(|m| m.visibility.as_str()).unwrap_or("public");
+    if visibility == "private" && !is_authorized(&headers) {
+        // Check for LCT token in Authorization header
+        let has_lct = headers.get("Authorization")
+            .and_then(|v| v.to_str().ok())
+            .map_or(false, |a| a.starts_with("Bearer "));
+        if !has_lct {
+            return Err(make_error_response(axum::http::StatusCode::UNAUTHORIZED, "Private project", "Login required or provide LCT token."));
+        }
+    }
 
     // Determine if JSON response is desired
     let want_json = q.format.as_deref() == Some("json") || headers.get("Accept").and_then(|v| v.to_str().ok()).map_or(false, |a| a.contains("application/json"));
@@ -185,7 +197,7 @@ pub async fn get_project_md_api(
     resp
 }
 
-// Remainder of the file unchanged (get_project_md_github, get_project_md_legacy, etc.)
+// Remainder unchanged
 pub async fn get_project_md_github(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -211,7 +223,7 @@ pub async fn get_project_md_github(
     };
     let meta = state.project_index.get_meta(&name);
     let visibility = meta.map(|m| m.visibility.as_str()).unwrap_or("public");
-    if visibility == "private" && !crate::utils::is_authorized(&headers) {
+    if visibility == "private" && !is_authorized(&headers) {
         return Err(make_error_response(
             axum::http::StatusCode::UNAUTHORIZED,
             "Private project",
