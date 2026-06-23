@@ -12,35 +12,31 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # 1. 将当前仓库 (lunar-serve) 拉取到子目录 'lunar-serve' 中
       - name: Checkout lunar-serve
         uses: actions/checkout@v5
         with:
           path: lunar-serve
 
-      # 2. 将依赖仓库 (lunar-interface) 拉取到同级的 'lunar-interface' 中
       - name: Checkout lunar-interface
         uses: actions/checkout@v5
         with:
           repository: LunarAST/lunar-interface
           path: lunar-interface
 
-      # 3. 设置 Rust 环境
       - name: Set up Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
-      # 4. 在 'lunar-serve' 子目录中执行编译
       - name: Build release binary
         run: cargo build --release
         working-directory: lunar-serve
 
-      # 5. 生成校验和
       - name: Generate SHA256 checksums
         run: sha256sum target/release/lunar-serve > checksums.txt
         working-directory: lunar-serve
 
-      # 6. 上传校验和至 Release
-      - name: Upload checksums to release
+      - name: Upload binary and checksums to release
         uses: softprops/action-gh-release@v3
         with:
-          files: lunar-serve/checksums.txt
+          files: |
+            lunar-serve/target/release/lunar-serve
+            lunar-serve/checksums.txt
