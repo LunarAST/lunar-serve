@@ -1,20 +1,49 @@
 use axum::{
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
-    Json,
+    response::{IntoResponse, Response, Json},
 };
 use lunar_interface::{AlignmentEntry, LunarMap};
 use crate::{ProjectMeta, utils::{render_directory_tree, render_directory_tree_json}};
 use std::collections::HashMap;
 use std::fs;
+use std::sync::{Mutex, OnceLock};
+
+// 🚀 全局静态目录树缓存（进程生存期内仅首次扫描磁盘，后续 0ms 内存秒回，极致节省 CPU/IO 算力）
+static TREE_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+static JSON_TREE_CACHE: OnceLock<Mutex<HashMap<String, serde_json::Value>>> = OnceLock::new();
+
+fn get_cached_directory_tree(path: &str) -> String {
+    let cache = TREE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut lock = cache.lock().unwrap();
+    if let Some(tree) = lock.get(path) {
+        return tree.clone();
+    }
+    let tree = render_directory_tree(path);
+    lock.insert(path.to_string(), tree.clone());
+    tree
+}
+
+fn get_cached_directory_tree_json(path: &str) -> serde_json::Value {
+    let cache = JSON_TREE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut lock = cache.lock().unwrap();
+    if let Some(tree) = lock.get(path) {
+        return tree.clone();
+    }
+    let tree = render_directory_tree_json(path);
+    lock.insert(path.to_string(), tree.clone());
+    tree
+}
 
 /// Renders either JSON or Markdown project tree based on the HTTP Accept header.
+/// Accepts an optional LCT token for AI-friendly URL generation and a request branch.
 pub fn render_negotiated_tree(
     headers: &HeaderMap,
     map: &LunarMap,
     name: &str,
     meta: Option<&ProjectMeta>,
     is_authenticated: bool,
+    token: Option<&str>,
+    request_branch: Option<&str>, // NEW: branch from request, overrides meta
 ) -> Result<Response, (StatusCode, String)> {
     let accept_header = headers.get("Accept").and_then(|v| v.to_str().ok()).unwrap_or("");
 
@@ -30,15 +59,16 @@ pub fn render_negotiated_tree(
     if accept_header.contains("application/json") {
         if let Some(ref path) = base_path {
             if std::path::Path::new(path).exists() {
-                let json_tree = render_directory_tree_json(path);
+                // 🚀 使用缓存的 JSON 目录树
+                let json_tree = get_cached_directory_tree_json(path);
                 return Ok(Json(json_tree).into_response());
             }
         }
         return Ok(Json(serde_json::Value::Null).into_response());
     }
 
-    // Default to highly cohesive Markdown with embedded file tree outline
-    let md = render_project_md(headers, map, name, meta, is_authenticated);
+    // Default to Markdown with embedded file tree outline
+    let md = render_project_md(headers, map, name, meta, is_authenticated, token, request_branch);
     Ok(md.into_response())
 }
 
@@ -69,6 +99,8 @@ pub fn render_project_md(
     name: &str,
     meta: Option<&ProjectMeta>,
     is_authenticated: bool,
+    token: Option<&str>,
+    request_branch: Option<&str>, // NEW: branch from request, overrides meta
 ) -> String {
     let project = map.projects.iter().find(|p| p.name.eq_ignore_ascii_case(name));
     if project.is_none() { return format!("# Project `{}` not found.\n", name); }
@@ -84,7 +116,10 @@ pub fn render_project_md(
         
     let git_owner = meta.and_then(|m| m.github.as_ref()).map(|g| g.owner.as_str()).unwrap_or("Jasonmilk");
     let git_repo = meta.and_then(|m| m.github.as_ref()).map(|g| g.repo.as_str()).unwrap_or(name);
-    let git_branch = meta.and_then(|m| m.github.as_ref()).map(|g| g.branch.as_str()).unwrap_or("rs2");
+    // Use request_branch if provided, otherwise fallback to meta branch or default
+    let git_branch = request_branch
+        .or_else(|| meta.and_then(|m| m.github.as_ref()).map(|g| g.branch.as_str()))
+        .unwrap_or("rs2");
 
     let base_path: Option<String> = meta.and_then(|m| m.path.as_deref())
         .map(|p| p.to_string())
@@ -99,10 +134,6 @@ pub fn render_project_md(
     // ------------------------------------------------------------------------
     // AI Instruction Loading — Config-Driven, Project-Agnostic
     // ------------------------------------------------------------------------
-    // The instruction is loaded from `config/ai-instruction.md` relative to the
-    // current working directory of the server process.
-    // No project-local overrides. No hardcoded fallback.
-    // ------------------------------------------------------------------------
     let instruction_path = std::path::Path::new("lunar-serve/config/ai-instruction.md");
     if instruction_path.exists() {
         if let Ok(inst_content) = fs::read_to_string(instruction_path) {
@@ -116,7 +147,6 @@ pub fn render_project_md(
             md.push_str("\n\n---\n\n");
         }
     }
-    // If config/ai-instruction.md does not exist, render nothing.
     // ------------------------------------------------------------------------
 
     md.push_str(&format!("# Project: {}\n\n- Type: {}\n- Scan Status: {}\n- Exposed: {}\n- Consumed: {}\n\n", p.name, p.project_type, p.scan_status, exp, con));
@@ -151,9 +181,17 @@ pub fn render_project_md(
             md.push_str("```\n");
             md.push_str(&format!("# Repository: {}/{}\n", git_owner, git_repo));
             md.push_str(&format!("# Branch: {} (Ecosystem automatic path discovery)\n", git_branch));
-            md.push_str(&format!("# To read project manual: fetch /raw/{}/README.md\n", git_branch));
-            md.push_str(&format!("# To read any source file: request /raw/{}/<filepath>\n\n", git_branch));
-            md.push_str(&render_directory_tree(path));
+            
+            let base_url = if let Some(tok) = token {
+                format!("/t/{}/{}/{}/raw/{}", tok, git_owner, git_repo, git_branch)
+            } else {
+                format!("/raw/{}", git_branch)
+            };
+            md.push_str(&format!("# To read project manual: fetch {}/README.md\n", base_url));
+            md.push_str(&format!("# To read any source file: request {}/<filepath>\n\n", base_url));
+            
+            // 🚀 使用带静态缓存的扫盘渲染
+            md.push_str(&get_cached_directory_tree(path));
             md.push_str("```\n");
 
             let todo_path = path_obj.join(".lunar/ai-todo.json");

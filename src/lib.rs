@@ -3,6 +3,12 @@ use std::collections::HashMap;
 use ed25519_dalek::SigningKey;
 use std::path::PathBuf;
 
+// ---- NEW IMPORTS for AI raw handler ----
+use axum::extract::{Path, State};
+use axum::http::HeaderMap;
+use tokio::fs;
+// ----------------------------------------
+
 // ---------------------------------------------------------------------------
 // Original types
 // ---------------------------------------------------------------------------
@@ -164,7 +170,6 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         get_project_todo, post_project_todo, get_project_todo_diff,
         handle_setup, handle_setup_post, handle_login, handle_csrf_token,
         handle_token_generate, handle_dispatch,
-        handle_ai_readonly_tree,
     };
 
     Router::new()
@@ -187,7 +192,228 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/csrf-token", get(handle_csrf_token))
         .route("/token/generate", post(handle_token_generate))
         .route("/dispatch", post(handle_dispatch))
-        .route("/t/:token/:owner/:repo/tree/:branch", get(handle_ai_readonly_tree))
-        .route("/t/:token/:owner/:repo/tree/:branch/*rest", get(handle_ai_readonly_tree))
+        // AI tree routes – order matters: more specific (with /*rest) MUST come first
+        .route("/t/:token/:owner/:repo/tree/:branch/*rest", get(crate::handle_ai_tree_file))
+        .route("/t/:token/:owner/:repo/tree/:branch", get(crate::handle_ai_tree_root))
+        // AI raw and blob routes
+        .route("/t/:token/:owner/:repo/raw/:branch/*filepath", get(crate::handle_ai_raw_file))
+        .route("/t/:token/:owner/:repo/blob/:branch/*filepath", get(crate::handle_ai_raw_file))
         .with_state(state)
+}
+
+// ============================================================================
+// NEW: AI Read‑only Raw/Blob Handler (LCT token in URL)
+// ============================================================================
+
+/// Path parameters for AI raw/blob requests.
+#[derive(serde::Deserialize)]
+pub struct AiFileParams {
+    pub token: String,
+    pub owner: String,
+    pub repo: String,
+    pub branch: String,
+    pub filepath: String,
+}
+
+/// Simple inline MIME type mapping (no external crate)
+fn guess_content_type(path: &PathBuf) -> &'static str {
+    let ext = path.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "js" => "application/javascript",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "txt" | "log" | "md" => "text/plain",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "ico" => "image/x-icon",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "gz" => "application/gzip",
+        "tar" => "application/x-tar",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Internal function to serve a file from a repository given validated parameters.
+async fn serve_file_from_repo(
+    state: &AppState,
+    params: &AiFileParams,
+) -> Response {
+    let verifying_key = state.signing_key.verifying_key();
+    let _payload = match verify_lct(
+        &params.token,
+        &verifying_key,
+        Some(&params.owner),
+        Some(&params.repo),
+        Some(&params.branch),
+    ) {
+        Ok(p) => p,
+        Err(e) => return make_error_response(
+            StatusCode::UNAUTHORIZED,
+            "Invalid or mismatched token",
+            &e,
+        ),
+    };
+
+    // 使用 fallback 逻辑查找项目名（与 tree root 一致）
+    let map = match load_map(&state.data_path) {
+        Ok(m) => m,
+        Err((s, e)) => return make_error_response(s, &e, ""),
+    };
+    let project_name = match state.project_index.get_name_by_github(
+        &params.owner,
+        &params.repo,
+        &params.branch,
+    ) {
+        Some(name) => name.to_string(),
+        None => {
+            match map.projects.iter().find(|p| p.name.eq_ignore_ascii_case(&params.repo)) {
+                Some(p) => p.name.clone(),
+                None => return make_error_response(
+                    StatusCode::NOT_FOUND,
+                    "Repository not found in index",
+                    "Check owner/repo/branch",
+                ),
+            }
+        }
+    };
+
+    let meta = match state.project_index.get_meta(&project_name) {
+        Some(m) => m,
+        None => return make_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Project meta missing",
+            "Index inconsistency",
+        ),
+    };
+
+    let repo_root = match &meta.path {
+        Some(p) => PathBuf::from(p),
+        None => return make_error_response(
+            StatusCode::NOT_FOUND,
+            "Repository not cloned locally",
+            "No path field",
+        ),
+    };
+
+    // ✅ FIX: Axum 的通配符 (*filepath) 会带有前导斜杠 '/'
+    // 在 Rust 中，Path::join 拼接绝对路径时会直接丢弃并覆盖 repo_root。
+    // 我们必须剔除前导斜杠以确保安全的相对路径拼接。
+    let clean_filepath = params.filepath.trim_start_matches('/');
+    let file_path = repo_root.join(clean_filepath);
+
+    let canonical_root = match repo_root.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return make_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Cannot resolve repo root",
+            "Check filesystem",
+        ),
+    };
+    let canonical_file = match file_path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return make_error_response(
+            StatusCode::NOT_FOUND,
+            "File not found or inaccessible",
+            "Check path",
+        ),
+    };
+    if !canonical_file.starts_with(&canonical_root) {
+        return make_error_response(
+            StatusCode::FORBIDDEN,
+            "Path traversal attempt",
+            "Only files under repo root are allowed",
+        );
+    }
+
+    match fs::read(&canonical_file).await {
+        Ok(content) => {
+            let mime = guess_content_type(&canonical_file);
+            (
+                [(axum::http::header::CONTENT_TYPE, mime)],
+                content,
+            )
+                .into_response()
+        }
+        Err(e) => make_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to read file",
+            &e.to_string(),
+        ),
+    }
+}
+
+pub async fn handle_ai_raw_file(
+    State(state): State<Arc<AppState>>,
+    Path(params): Path<AiFileParams>,
+) -> Response {
+    serve_file_from_repo(&state, &params).await
+}
+
+#[derive(serde::Deserialize)]
+pub struct AiTreeRootParams {
+    pub token: String,
+    pub owner: String,
+    pub repo: String,
+    pub branch: String,
+}
+
+pub async fn handle_ai_tree_root(
+    State(state): State<Arc<AppState>>,
+    Path(params): Path<AiTreeRootParams>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    use crate::handlers::core::MdQuery;
+    use crate::render;
+    use std::time::Instant;
+
+    let start = Instant::now();
+    let verifying_key = state.signing_key.verifying_key();
+    let _payload = verify_lct(
+        &params.token,
+        &verifying_key,
+        Some(&params.owner),
+        Some(&params.repo),
+        Some(&params.branch),
+    )
+    .map_err(|e| make_error_response(StatusCode::UNAUTHORIZED, &format!("Invalid token: {}", e), "Check LCT."))?;
+
+    let map = load_map(&state.data_path).map_err(|(s,e)| make_error_response(s, &e, ""))?;
+    let name = state.project_index.get_name_by_github(&params.owner, &params.repo, &params.branch)
+        .or_else(|| map.projects.iter().find(|p| p.name.eq_ignore_ascii_case(&params.repo)).map(|p| p.name.as_str()))
+        .ok_or_else(|| make_error_response(StatusCode::NOT_FOUND, "Project not found", "Check owner/repo/branch."))?;
+    let meta = state.project_index.get_meta(name);
+    let resp = render::render_negotiated_tree(
+        &headers,
+        &map,
+        name,
+        meta,
+        false,
+        Some(&params.token),
+        Some(&params.branch),
+    )
+    .map_err(|(status, err)| make_error_response(status, &err, ""))?;
+    write_audit_log("127.0.0.1", &headers, &format!("/t/.../{}/{}/tree/{}", params.owner, params.repo, params.branch), "GET", name, None, 200, start.elapsed().as_millis());
+    Ok(resp)
+}
+
+pub async fn handle_ai_tree_file(
+    State(state): State<Arc<AppState>>,
+    Path((token, owner, repo, branch, rest)): Path<(String, String, String, String, String)>,
+) -> Response {
+    let params = AiFileParams {
+        token,
+        owner,
+        repo,
+        branch,
+        filepath: rest,
+    };
+    serve_file_from_repo(&state, &params).await
 }
