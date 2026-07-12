@@ -1,21 +1,18 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::State,
     http::{HeaderMap, header, StatusCode},
     response::{IntoResponse, Response, Json},
 };
 use crate::{
-    AppState, make_error_response, load_map, write_audit_log,
-    create_session, validate_session, generate_lct, verify_lct, LctPayload,
+    AppState, make_error_response, write_audit_log,
+    create_session, validate_session, generate_lct, LctPayload,
     verify_totp, parse_lunar_patch,
 };
-use crate::render;
-use crate::handlers::core::MdQuery;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::Deserialize;
 use std::sync::Arc;
 use std::fs;
-use std::time::Instant;
 use chrono::Utc;
 
 fn get_client_ip(headers: &HeaderMap) -> String {
@@ -201,25 +198,4 @@ pub async fn handle_dispatch(
         .map_err(|e| make_error_response(StatusCode::INTERNAL_SERVER_ERROR, "Save patch error", &e.to_string()))?;
     write_audit_log(&get_client_ip(&headers), &headers, "/dispatch", "POST", "staging", Some(&filename), 200, 0);
     Ok(Json(serde_json::json!({ "status": "staged", "file": filename, "ai_agent": ai_agent })).into_response())
-}
-
-pub async fn handle_ai_readonly_tree(
-    State(state): State<Arc<AppState>>,
-    Path((token, owner, repo, branch)): Path<(String, String, String, String)>,
-    headers: HeaderMap,
-    _query: Query<MdQuery>,
-) -> Result<Response, Response> {
-    let start = Instant::now();
-    let verifying_key = state.signing_key.verifying_key();
-    let _lct = verify_lct(&token, &verifying_key, Some(&owner), Some(&repo), Some(&branch))
-        .map_err(|e| make_error_response(StatusCode::UNAUTHORIZED, &format!("Invalid token: {}", e), "Check LCT."))?;
-    let map = load_map(&state.data_path).map_err(|(s,e)| make_error_response(s, &e, ""))?;
-    let name = state.project_index.get_name_by_github(&owner, &repo, &branch)
-        .or_else(|| map.projects.iter().find(|p| p.name.eq_ignore_ascii_case(&repo)).map(|p| p.name.as_str()))
-        .ok_or_else(|| make_error_response(StatusCode::NOT_FOUND, "Project not found", "Check owner/repo/branch."))?;
-    let meta = state.project_index.get_meta(name);
-    let resp = render::render_negotiated_tree(&headers, &map, name, meta, false)
-        .map_err(|(status, err)| make_error_response(status, &err, ""));
-    write_audit_log("127.0.0.1", &headers, &format!("/t/.../{}/{}/tree/{}", owner, repo, branch), "GET", name, None, 200, start.elapsed().as_millis());
-    resp
 }

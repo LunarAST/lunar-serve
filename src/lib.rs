@@ -370,7 +370,6 @@ pub async fn handle_ai_tree_root(
     Path(params): Path<AiTreeRootParams>,
     headers: HeaderMap,
 ) -> Result<Response, Response> {
-    use crate::handlers::core::MdQuery;
     use crate::render;
     use std::time::Instant;
 

@@ -75,7 +75,7 @@ pub async fn get_json(State(state): State<Arc<AppState>>, headers: HeaderMap, Qu
 pub async fn get_markdown(State(state): State<Arc<AppState>>, Query(q): Query<MdQuery>) -> Result<String, Response> {
     let map = load_map(&state.data_path).map_err(|(s,e)| make_error_response(s, &e, ""))?;
     if q.summary { return Ok(render::render_summary(&map)); }
-    if let Some(ref scope) = q.scope { return Ok(render::render_project_md(&HeaderMap::new(), &map, scope, state.project_index.get_meta(scope), false)); }
+    if let Some(ref scope) = q.scope { return Ok(render::render_project_md(&HeaderMap::new(), &map, scope, state.project_index.get_meta(scope), false, None, None)); }
     if let Some(ref status) = q.status { return Ok(render::render_status_filter(&map, status)); }
     if let Some(ref path) = q.path { return Ok(render::render_path_filter(&map, path)); }
     if let Some(ref style) = q.style { if style == "mermaid" { return Ok(render::render_mermaid(&map)); } }
@@ -190,7 +190,7 @@ pub async fn get_project_md_api(
     }
 
     // Default behavior: Markdown or JSON without filters
-    let resp = render::render_negotiated_tree(&headers, &map, &name, meta, false)
+    let resp = render::render_negotiated_tree(&headers, &map, &name, meta, false, None, None)
         .map_err(|(status, err)| make_error_response(status, &err, ""));
     let sc = resp.as_ref().map(|r| r.status().as_u16()).unwrap_or(500);
     write_audit_log("127.0.0.1", &headers, &format!("/api/v1/projects/{}/map", name), "GET", &name, None, sc, start.elapsed().as_millis());
@@ -231,7 +231,7 @@ pub async fn get_project_md_github(
         ));
     }
     if q.style.as_deref() == Some("mermaid") { return Ok(render::render_mermaid(&map).into_response()); }
-    let resp = render::render_negotiated_tree(&headers, &map, &name, meta, visibility == "private")
+    let resp = render::render_negotiated_tree(&headers, &map, &name, meta, visibility == "private", None, Some(&branch))
         .map_err(|(status, err)| make_error_response(status, &err, ""));
     let sc = resp.as_ref().map(|r| r.status().as_u16()).unwrap_or(500);
     write_audit_log("127.0.0.1", &headers, &format!("/{}/{}/tree/{}", owner, repo, branch), "GET", &name, None, sc, start.elapsed().as_millis());
@@ -248,7 +248,7 @@ pub async fn get_project_md_legacy(
     let map = load_map(&state.data_path).map_err(|(s,e)| make_error_response(s, &e, ""))?;
     let meta = state.project_index.get_meta(&name);
     if q.style.as_deref() == Some("mermaid") { return Ok(render::render_mermaid(&map).into_response()); }
-    render::render_negotiated_tree(&headers, &map, &name, meta, false)
+    render::render_negotiated_tree(&headers, &map, &name, meta, false, None, None)
         .map_err(|(status, err)| make_error_response(status, &err, ""))
 }
 
@@ -264,7 +264,7 @@ pub async fn get_private_project_md(
     if !auth.starts_with("Bearer ") { return Err(make_error_response(axum::http::StatusCode::UNAUTHORIZED, "Missing JWT", "Private routes require Bearer token.")); }
     let map = load_map(&state.data_path).map_err(|(s,e)| make_error_response(s, &e, ""))?;
     let meta = state.project_index.get_meta(name);
-    render::render_negotiated_tree(&headers, &map, name, meta, true)
+    render::render_negotiated_tree(&headers, &map, name, meta, true, None, None)
         .map_err(|(status, err)| make_error_response(status, &err, ""))
 }
 
