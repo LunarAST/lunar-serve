@@ -140,7 +140,12 @@ use axum::response::{IntoResponse, Response, Json};
 pub fn make_error_response(status: StatusCode, error_msg: &str, hint: &str) -> Response {
     let body = serde_json::json!({ "error": error_msg, "hint": hint });
     let mut resp = (status, Json(body)).into_response();
-    resp.headers_mut().insert("X-Lunar-Diagnostic", axum::http::HeaderValue::from_str(hint).unwrap_or(axum::http::HeaderValue::from_static("error")));
+    let headers = resp.headers_mut();
+    headers.insert("X-Lunar-Diagnostic", axum::http::HeaderValue::from_str(hint).unwrap_or(axum::http::HeaderValue::from_static("error")));
+    
+    // 🚀 在错误返回处追加 CORS 跨域许可
+    headers.insert(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, axum::http::HeaderValue::from_static("*"));
+    headers.insert(axum::http::header::ACCESS_CONTROL_ALLOW_HEADERS, axum::http::HeaderValue::from_static("Authorization, Content-Type, X-CSRF-Token"));
     resp
 }
 
@@ -174,11 +179,11 @@ pub fn build_app(state: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/", get(get_index))
-        .route("/lunar-map.json", get(get_json))
+        .route("/lunar-map.json", get(get_json).options(crate::handle_options_preflight))
         .route("/lunar-map.md", get(get_markdown))
-        .route("/api/v1/projects/:name/map", get(get_project_md_api))
-        .route("/api/v1/projects/:name/raw/*filepath", get(get_raw_file_api))
-        .route("/api/v1/projects/:name/todo", get(get_project_todo).post(post_project_todo))
+        .route("/api/v1/projects/:name/map", get(get_project_md_api).options(crate::handle_options_preflight))
+        .route("/api/v1/projects/:name/raw/*filepath", get(get_raw_file_api).options(crate::handle_options_preflight))
+        .route("/api/v1/projects/:name/todo", get(get_project_todo).post(post_project_todo).options(crate::handle_options_preflight))
         .route("/api/v1/projects/:name/todo/diff", get(get_project_todo_diff))
         .route("/:owner/:repo/tree/:branch", get(get_project_md_github))
         .route("/:owner/:repo/raw/:branch/*filepath", get(get_raw_file_github))
@@ -192,12 +197,13 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/csrf-token", get(handle_csrf_token))
         .route("/token/generate", post(handle_token_generate))
         .route("/dispatch", post(handle_dispatch))
-        // AI tree routes – order matters: more specific (with /*rest) MUST come first
-        .route("/t/:token/:owner/:repo/tree/:branch/*rest", get(crate::handle_ai_tree_file))
-        .route("/t/:token/:owner/:repo/tree/:branch", get(crate::handle_ai_tree_root))
-        // AI raw and blob routes
-        .route("/t/:token/:owner/:repo/raw/:branch/*filepath", get(crate::handle_ai_raw_file))
-        .route("/t/:token/:owner/:repo/blob/:branch/*filepath", get(crate::handle_ai_raw_file))
+        
+        // 🚀 AI 树状导航与只读流路由：通过 Axum 链式调用 .options()，优雅承接浏览器的跨域预检
+        .route("/t/:token/:owner/:repo/tree/:branch/*rest", get(crate::handle_ai_tree_file).options(crate::handle_options_preflight))
+        .route("/t/:token/:owner/:repo/tree/:branch", get(crate::handle_ai_tree_root).options(crate::handle_options_preflight))
+        // AI 只读文件与 Blob 路由：同样添加预检路由绑定
+        .route("/t/:token/:owner/:repo/raw/:branch/*filepath", get(crate::handle_ai_raw_file).options(crate::handle_options_preflight))
+        .route("/t/:token/:owner/:repo/blob/:branch/*filepath", get(crate::handle_ai_raw_file).options(crate::handle_options_preflight))
         .with_state(state)
 }
 
@@ -337,7 +343,12 @@ async fn serve_file_from_repo(
         Ok(content) => {
             let mime = guess_content_type(&canonical_file);
             (
-                [(axum::http::header::CONTENT_TYPE, mime)],
+                [
+                    (axum::http::header::CONTENT_TYPE, mime),
+                    // 🚀 使用强类型 HeaderName 常量，确保数组内部类型 100% 严格同构 [1]
+                    (axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+                    (axum::http::header::ACCESS_CONTROL_ALLOW_HEADERS, "Authorization, Content-Type, X-CSRF-Token"),
+                ],
                 content,
             )
                 .into_response()
@@ -415,4 +426,16 @@ pub async fn handle_ai_tree_file(
         filepath: rest,
     };
     serve_file_from_repo(&state, &params).await
+}
+
+// ============================================================================
+// 🚀 新增：CORS 跨域预检统一处理器 (0 外部依赖，完美应对浏览器沙箱跨域) [1.1]
+// ============================================================================
+pub async fn handle_options_preflight() -> Response {
+    let mut resp = StatusCode::OK.into_response();
+    let headers = resp.headers_mut();
+    headers.insert(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, axum::http::HeaderValue::from_static("*"));
+    headers.insert(axum::http::header::ACCESS_CONTROL_ALLOW_HEADERS, axum::http::HeaderValue::from_static("Authorization, Content-Type, X-CSRF-Token"));
+    headers.insert(axum::http::header::ACCESS_CONTROL_ALLOW_METHODS, axum::http::HeaderValue::from_static("GET, POST, OPTIONS"));
+    resp
 }
