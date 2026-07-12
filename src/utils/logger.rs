@@ -24,6 +24,8 @@ pub fn write_audit_log(
 
     let user_agent = headers.get("User-Agent").and_then(|v| v.to_str().ok()).unwrap_or("unknown");
     let ua_lower = user_agent.to_lowercase();
+    
+    // 🚀 升级：拓展 AI 智能体与开发端 API 客户端识别，精准拦截 Go-http-client、requests、axios、reqwest 等代理
     let is_ai_agent = ua_lower.contains("bot") 
         || ua_lower.contains("agent") 
         || ua_lower.contains("chatgpt") 
@@ -32,9 +34,14 @@ pub fn write_audit_log(
         || ua_lower.contains("oai") 
         || ua_lower.contains("deepseek") 
         || ua_lower.contains("cursor") 
-        || ua_lower.contains("bridge");
+        || ua_lower.contains("bridge")
+        || ua_lower.contains("go-http-client")
+        || ua_lower.contains("reqwest")
+        || ua_lower.contains("python")
+        || ua_lower.contains("http")
+        || ua_lower.contains("axios")
+        || ua_lower.contains("fetch");
 
-    // 🚀 调用全局 mod.rs 里的 is_authorized，彻底打破底层循环引用
     let auth_status = if crate::utils::is_authorized(headers) { "ValidBearer" } else { "Public" };
 
     let log_entry = json!({
@@ -56,13 +63,13 @@ pub fn write_audit_log(
 
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_file_path) {
         if let Ok(line) = serde_json::to_string(&log_entry) {
-            let _ = writeln!(file, "{}", line); // 机器写：保持纯净的 MCI jsonl 格式 [1]
+            let _ = writeln!(file, "{}", line); // 机器写：保持全息 jsonl 格式不变 [1]
 
-            // 🚀 人类读：格式化流式日志，杜绝控制台视觉噪音 (HCI 重构) [1]
+            // 🚀 人类读：全新“双行全息日志结构”，兼顾极致美观与 100% 信息对齐 (HCI 深度重构) [1]
             let time_str = Utc::now().format("%H:%M:%S").to_string();
             let agent_icon = if is_ai_agent { "🤖 AI" } else { "🧑 HU" };
             
-            // 终端着色 (无第三方依赖，纯 ANSI Escapes 保证轻量化)
+            // 终端动作着色
             let method_color = match method {
                 "GET" => "\x1b[36m",    // 青色
                 "POST" => "\x1b[32m",   // 绿色
@@ -78,17 +85,28 @@ pub fn write_audit_log(
             };
             
             let reset = "\x1b[0m";
+            let gray = "\x1b[90m"; // 优雅的暗灰色，防止抢占主行视觉焦点
 
-            // 输出极度美观、流式、各列对齐的日志
+            // 第 1 行：核心链路流 (时间 | 方法 | 路径)
             println!(
-                "{} | {} | {}{:<4}{} | {}{}{} | {:>4}ms | {:<36} | {}",
+                "{} | {}{:<4}{} | {}",
                 time_str,
-                agent_icon,
                 method_color, method, reset,
-                status_color, status, reset,
+                uri
+            );
+            
+            // 第 2 行：全息元数据卡片 (暗灰呈现，保留 100% 精确数据，包括完整 UA 浏览器指纹) [1]
+            println!(
+                "  {}↳ Status: {}{}{} | Time: {:>3}ms | Project: {} | Auth: {} | Agent: {} | IP: {} | UA: {}{}",
+                gray,
+                status_color, status, gray,
                 duration_ms,
-                uri,
-                client_ip
+                project,
+                auth_status,
+                agent_icon,
+                client_ip,
+                user_agent,
+                reset
             );
         }
     }
