@@ -51,15 +51,104 @@ pub fn read_secure_file(base_path_str: &str, relative_path_str: &str) -> Result<
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read file".to_string(), e.to_string()))
 }
 
+// ============================================================================
+// 🚀 自适应 .gitignore 匹配器 (0 硬编码、自动加载生态契约、不产生多余垃圾)
+// ============================================================================
+pub struct GitIgnoreMatcher {
+    patterns: Vec<String>,
+}
+
+impl GitIgnoreMatcher {
+    pub fn load_from_dir(dir: &Path) -> Self {
+        let mut patterns = Vec::new();
+
+        // 默认全局底线忽略规则
+        patterns.push(".git".to_string());
+        patterns.push("target".to_string());
+        patterns.push("node_modules".to_string());
+        patterns.push("dist".to_string());
+        patterns.push("tmp".to_string());
+        patterns.push("CACHEDIR.TAG".to_string());
+        patterns.push("__pycache__".to_string());
+        patterns.push(".venv".to_string());
+        patterns.push("venv".to_string());
+        patterns.push(".idea".to_string());
+        patterns.push(".vscode".to_string());
+        patterns.push("*.pyc".to_string());
+        patterns.push("*.pyo".to_string());
+        patterns.push("*.pyd".to_string());
+        patterns.push("*.class".to_string());
+        patterns.push("*.o".to_string());
+        patterns.push("*.exe".to_string());
+        patterns.push("*.dll".to_string());
+        patterns.push("*.so".to_string());
+        patterns.push("*.ds_store".to_string());
+        patterns.push("*.lock".to_string());
+
+        // 如果项目存在 .gitignore，则动态读取并追加本地规则 (做对，不做快)
+        let ignore_path = dir.join(".gitignore");
+        if ignore_path.exists() {
+            if let Ok(content) = fs::read_to_string(&ignore_path) {
+                for line in content.lines() {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    let pattern = line.trim_start_matches('/').trim_end_matches('/').to_string();
+                    if !pattern.is_empty() {
+                        patterns.push(pattern);
+                    }
+                }
+            }
+        }
+        Self { patterns }
+    }
+
+    /// 核心匹配熔断检查
+    pub fn is_ignored(&self, path: &Path, root: &Path) -> bool {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.is_empty() {
+            return false;
+        }
+
+        // 获取当前扫描路径相对于根目录的相对路径，以便支持目录级规则匹配
+        let rel_path = path.strip_prefix(root).ok();
+        let rel_path_str = rel_path.map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+
+        for pat in &self.patterns {
+            // 1. 精确文件名/目录名匹配
+            if name == pat {
+                return true;
+            }
+            // 2. 通配符后缀匹配 (e.g. *.jsonl)
+            if pat.starts_with("*.") {
+                let ext = pat.trim_start_matches("*.");
+                if path.extension().and_then(|e| e.to_str()).map_or(false, |e| e.eq_ignore_ascii_case(ext)) {
+                    return true;
+                }
+            }
+            // 3. 相对路径前后缀匹配
+            if !rel_path_str.is_empty() {
+                if rel_path_str == *pat || rel_path_str.starts_with(&format!("{}/", pat)) || rel_path_str.ends_with(&format!("/{}", pat)) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
 /// Helper function to build a sorted, filtered directory tree for AI context.
 pub fn render_directory_tree(base_path_str: &str) -> String {
     let mut tree_string = String::new();
     let path = Path::new(base_path_str);
+    let matcher = GitIgnoreMatcher::load_from_dir(path);
     let mut file_count = 0;
-    if let Err(e) = traverse_for_tree(path, path, 0, &mut tree_string, &mut file_count) {
+    if let Err(e) = traverse_for_tree(path, path, 0, &mut tree_string, &mut file_count, &matcher) {
         return format!("*Error generating file tree: {}*", e);
     }
-    tree_string
+    // 🚀 清洗掉由于折叠闭合在最末尾或中间产生的空 ```` ``` 代码块，确保 Markdown 语法完美纯净
+    tree_string.replace("```\n```\n", "")
 }
 
 fn traverse_for_tree(
@@ -68,6 +157,7 @@ fn traverse_for_tree(
     depth: usize,
     output: &mut String,
     file_count: &mut usize,
+    matcher: &GitIgnoreMatcher,
 ) -> std::io::Result<()> {
     if depth > 5 || *file_count > 300 {
         return Ok(());
@@ -88,43 +178,39 @@ fn traverse_for_tree(
 
         for entry in entries {
             let path = entry.path();
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-
-            if name == ".git"
-                || name == "target"
-                || name == "node_modules"
-                || name == "dist"
-                || name == "tmp"
-                || name == "CACHEDIR.TAG"
-                || name == "__pycache__"
-                || name == ".venv"
-                || name == "venv"
-                || name == ".idea"
-                || name == ".vscode"
-            {
+            
+            // 🚀 尊重 .gitignore：自适应匹配熔断
+            if matcher.is_ignored(&path, root) {
                 continue;
             }
 
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             let indent = "  ".repeat(depth);
-            if path.is_dir() {
-                output.push_str(&format!("{}- {}/\n", indent, name));
-                traverse_for_tree(root, &path, depth + 1, output, file_count)?;
-            } else {
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-                if ext == "pyc"
-                    || ext == "pyo"
-                    || ext == "pyd"
-                    || ext == "class"
-                    || ext == "o"
-                    || ext == "exe"
-                    || ext == "dll"
-                    || ext == "so"
-                    || ext == "ds_store"
-                    || ext == "lock"
-                {
-                    continue;
-                }
 
+            if path.is_dir() {
+                // 判断是否为高噪音元数据目录，是则使用 <details> 静态折叠
+                let is_noise = name == ".lunar" 
+                    || name == ".backup" 
+                    || name == "access-logs" 
+                    || name == "suggestions"
+                    || name == ".github";
+
+                if is_noise {
+                    output.push_str("```\n"); // 闭合外部代码块
+                    output.push_str(&format!("{}<details><summary>📁 {}/ (Folded for Humans)</summary>\n\n", indent, name));
+                    output.push_str("```\n"); // 重启内部代码块以保持等宽格式
+                    
+                    output.push_str(&format!("{}- {}/\n", indent, name));
+                    traverse_for_tree(root, &path, depth + 1, output, file_count, matcher)?;
+                    
+                    output.push_str("```\n"); // 闭合内部代码块
+                    output.push_str(&format!("{}</details>\n\n", indent));
+                    output.push_str("```\n"); // 重开外部代码块，无缝衔接后续节点
+                } else {
+                    output.push_str(&format!("{}- {}/\n", indent, name));
+                    traverse_for_tree(root, &path, depth + 1, output, file_count, matcher)?;
+                }
+            } else {
                 output.push_str(&format!("{}- {}\n", indent, name));
                 *file_count += 1;
                 if *file_count > 300 {
@@ -140,8 +226,9 @@ fn traverse_for_tree(
 pub fn render_directory_tree_json(base_path_str: &str) -> serde_json::Value {
     let mut files = Vec::new();
     let path = Path::new(base_path_str);
+    let matcher = GitIgnoreMatcher::load_from_dir(path);
     let mut file_count = 0;
-    if let Err(_) = traverse_for_json(path, path, 0, &mut files, &mut file_count) {
+    if let Err(_) = traverse_for_json(path, path, 0, &mut files, &mut file_count, &matcher) {
         return serde_json::Value::Null;
     }
     serde_json::to_value(files).unwrap_or(serde_json::Value::Null)
@@ -153,6 +240,7 @@ fn traverse_for_json(
     depth: usize,
     output: &mut Vec<String>,
     file_count: &mut usize,
+    matcher: &GitIgnoreMatcher,
 ) -> std::io::Result<()> {
     if depth > 5 || *file_count > 300 {
         return Ok(());
@@ -173,41 +261,15 @@ fn traverse_for_json(
 
         for entry in entries {
             let path = entry.path();
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-
-            if name == ".git"
-                || name == "target"
-                || name == "node_modules"
-                || name == "dist"
-                || name == "tmp"
-                || name == "CACHEDIR.TAG"
-                || name == "__pycache__"
-                || name == ".venv"
-                || name == "venv"
-                || name == ".idea"
-                || name == ".vscode"
-            {
+            
+            // 🚀 JSON 接口也需要对齐 .gitignore 规则，保证全景一致、剔除垃圾
+            if matcher.is_ignored(&path, root) {
                 continue;
             }
 
             if path.is_dir() {
-                traverse_for_json(root, &path, depth + 1, output, file_count)?;
+                traverse_for_json(root, &path, depth + 1, output, file_count, matcher)?;
             } else {
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-                if ext == "pyc"
-                    || ext == "pyo"
-                    || ext == "pyd"
-                    || ext == "class"
-                    || ext == "o"
-                    || ext == "exe"
-                    || ext == "dll"
-                    || ext == "so"
-                    || ext == "ds_store"
-                    || ext == "lock"
-                {
-                    continue;
-                }
-
                 if let Ok(rel) = path.strip_prefix(root) {
                     output.push(rel.to_string_lossy().into_owned());
                 }
