@@ -291,21 +291,22 @@ async fn serve_file_from_repo(
         }
     };
 
-    let meta = match state.project_index.get_meta(&project_name) {
-        Some(m) => m,
-        None => return make_error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Project meta missing",
-            "Index inconsistency",
-        ),
-    };
+    // 🚀 自适应降级自愈机制：优先从内存 project_index (repos.json) 提取路径
+    // 若内存索引未同步，则无缝回退至实时加载的 map.projects (lunar-map.json) 提取物理路径 [1]
+    let repo_root = state.project_index.get_meta(&project_name)
+        .and_then(|m| m.path.as_ref().map(PathBuf::from))
+        .or_else(|| {
+            map.projects.iter()
+                .find(|proj| proj.name.eq_ignore_ascii_case(&project_name))
+                .and_then(|proj| proj.path.as_ref().map(PathBuf::from))
+        });
 
-    let repo_root = match &meta.path {
-        Some(p) => PathBuf::from(p),
+    let repo_root = match repo_root {
+        Some(p) => p,
         None => return make_error_response(
             StatusCode::NOT_FOUND,
-            "Repository not cloned locally",
-            "No path field",
+            "Repository path not found",
+            "Please check if this project has a valid path in repos.json or lunar-map.json",
         ),
     };
 
