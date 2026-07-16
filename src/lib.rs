@@ -228,16 +228,17 @@ fn guess_content_type(path: &PathBuf) -> &'static str {
         .unwrap_or("")
         .to_lowercase();
     match ext.as_str() {
-        "html" | "htm" => "text/html",
-        "css" => "text/css",
-        "js" => "application/javascript",
-        "json" => "application/json",
-        "xml" => "application/xml",
-        "txt" | "log" | "md" => "text/plain",
+        // 🚀 核心：对所有人类与 AI 频繁阅读的文本文件强制加上 ; charset=utf-8 契约参数，杜绝一切乱码发生 [1]
+        "html" | "htm" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" => "application/javascript; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "xml" => "application/xml; charset=utf-8",
+        "txt" | "log" | "md" => "text/plain; charset=utf-8",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
-        "svg" => "image/svg+xml",
+        "svg" => "image/svg+xml; charset=utf-8",
         "ico" => "image/x-icon",
         "pdf" => "application/pdf",
         "zip" => "application/zip",
