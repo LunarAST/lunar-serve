@@ -252,7 +252,10 @@ fn guess_content_type(path: &PathBuf) -> &'static str {
 async fn serve_file_from_repo(
     state: &AppState,
     params: &AiFileParams,
+    headers: &HeaderMap, // 🚀 升级：引入 HeaderMap 支持日志透传
 ) -> Response {
+    let start = std::time::Instant::now(); // 🚀 升级：全息流时长测算
+
     let verifying_key = state.signing_key.verifying_key();
     let _payload = match verify_lct(
         &params.token,
@@ -262,11 +265,24 @@ async fn serve_file_from_repo(
         Some(&params.branch),
     ) {
         Ok(p) => p,
-        Err(e) => return make_error_response(
-            StatusCode::UNAUTHORIZED,
-            "Invalid or mismatched token",
-            &e,
-        ),
+        Err(e) => {
+            // 🚀 记录 401 鉴权失败审计
+            write_audit_log(
+                "127.0.0.1",
+                headers,
+                &format!("/t/.../{}/{}/raw/{}/{}", params.owner, params.repo, params.branch, params.filepath),
+                "GET",
+                &params.repo,
+                Some(&params.filepath),
+                401,
+                start.elapsed().as_millis(),
+            );
+            return make_error_response(
+                StatusCode::UNAUTHORIZED,
+                "Invalid or mismatched token",
+                &e,
+            );
+        }
     };
 
     // 使用 fallback 逻辑查找项目名（与 tree root 一致）
@@ -327,11 +343,24 @@ async fn serve_file_from_repo(
     };
     let canonical_file = match file_path.canonicalize() {
         Ok(p) => p,
-        Err(_) => return make_error_response(
-            StatusCode::NOT_FOUND,
-            "File not found or inaccessible",
-            "Check path",
-        ),
+        Err(_) => {
+            // 🚀 记录 404 文件未找到审计
+            write_audit_log(
+                "127.0.0.1",
+                headers,
+                &format!("/t/.../{}/{}/raw/{}/{}", params.owner, params.repo, params.branch, params.filepath),
+                "GET",
+                &project_name,
+                Some(&params.filepath),
+                404,
+                start.elapsed().as_millis(),
+            );
+            return make_error_response(
+                StatusCode::NOT_FOUND,
+                "File not found or inaccessible",
+                "Check path",
+            );
+        }
     };
     if !canonical_file.starts_with(&canonical_root) {
         return make_error_response(
@@ -344,6 +373,19 @@ async fn serve_file_from_repo(
     match fs::read(&canonical_file).await {
         Ok(content) => {
             let mime = guess_content_type(&canonical_file);
+            
+            // 🚀 升级核心：记录 200 文件访问成功审计 (精准反馈具体读了哪个文件) [1.1]
+            write_audit_log(
+                "127.0.0.1",
+                headers,
+                &format!("/t/.../{}/{}/raw/{}/{}", params.owner, params.repo, params.branch, params.filepath),
+                "GET",
+                &project_name,
+                Some(&params.filepath),
+                200,
+                start.elapsed().as_millis(),
+            );
+
             (
                 [
                     (axum::http::header::CONTENT_TYPE, mime),
@@ -365,9 +407,10 @@ async fn serve_file_from_repo(
 
 pub async fn handle_ai_raw_file(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap, // 🚀 提取请求头
     Path(params): Path<AiFileParams>,
 ) -> Response {
-    serve_file_from_repo(&state, &params).await
+    serve_file_from_repo(&state, &params, &headers).await
 }
 
 #[derive(serde::Deserialize)]
@@ -418,6 +461,7 @@ pub async fn handle_ai_tree_root(
 
 pub async fn handle_ai_tree_file(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap, // 🚀 提取请求头
     Path((token, owner, repo, branch, rest)): Path<(String, String, String, String, String)>,
 ) -> Response {
     let params = AiFileParams {
@@ -427,7 +471,7 @@ pub async fn handle_ai_tree_file(
         branch,
         filepath: rest,
     };
-    serve_file_from_repo(&state, &params).await
+    serve_file_from_repo(&state, &params, &headers).await
 }
 
 // ============================================================================
